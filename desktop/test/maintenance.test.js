@@ -27,8 +27,15 @@ function createShell(initial = {}, failKey = '') {
       settings.set('device.timezone', args[3]);
       return '';
     }
+    if (args[0] === 'cmd' && args[1] === 'alarm' && args[2] === 'set-time') {
+      settings.set('device.epoch_seconds', Math.floor(Number(args[3]) / 1000));
+      return '';
+    }
     if (args[0] === 'getprop' && args[1] === 'persist.sys.timezone') {
       return settings.get('device.timezone') ?? 'America/Santo_Domingo';
+    }
+    if (args[0] === 'date' && args[1] === '+%s') {
+      return String(settings.get('device.epoch_seconds') ?? Math.floor(Date.now() / 1000));
     }
     if (args[0] === 'date') return 'Sat Jul 25 12:00:00 AST 2026';
     if (args[0] === 'ip' && args[1] === 'route') return 'default via 192.168.1.1 dev wlan0 src 192.168.1.50';
@@ -64,8 +71,11 @@ test('stabilizer validates input and verifies every setting', async () => {
     screen_timeout: true,
     animations: true,
     timezone: true,
+    clock: true,
   });
-  assert.ok(adb.calls.some(call => call.args.join(' ') === 'settings put global auto_time 1'));
+  assert.ok(result.data.clock_drift_seconds <= 10);
+  assert.ok(adb.calls.some(call => call.args.join(' ') === 'settings put global auto_time 0'));
+  assert.ok(adb.calls.some(call => call.args.slice(0, 3).join(' ') === 'cmd alarm set-time'));
 });
 
 test('stabilizer reports partial ADB failures instead of false success', async () => {

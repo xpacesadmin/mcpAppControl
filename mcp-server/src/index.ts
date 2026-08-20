@@ -34,7 +34,15 @@ const TOOLS = [
     {
         name: "devices_list",
         description: "Lista todos los dispositivos registrados en la flota",
-        inputSchema: { type: "object", properties: {} },
+        inputSchema: {
+            type: "object",
+            properties: {
+                page: { type: "number", minimum: 1 },
+                per_page: { type: "number", minimum: 1, maximum: 500, description: "Defaults to 200 so the fleet is not silently truncated" },
+                status: { type: "string", enum: ["online", "busy", "error", "offline"] },
+                search: { type: "string" },
+            },
+        },
     },
     {
         name: "devices_get_status",
@@ -76,8 +84,10 @@ const TOOLS = [
                 keep_awake: { type: "boolean" },
                 screen_timeout_minutes: { type: "number", minimum: 1, maximum: 120 },
                 animation_scale: { type: "number", enum: [0, 0.5, 1] },
-                sync_time: { type: "boolean" },
-                timezone: { type: "string", description: "Zona IANA, por ejemplo America/Chicago" },
+                sync_time: { type: "boolean", description: "Defaults to true; synchronize and verify the device clock" },
+                clock_source: { type: "string", enum: ["host", "automatic"], description: "host copies the MCP host epoch; automatic uses Android network time" },
+                timezone: { type: "string", description: "Zona IANA; defaults to MCP_DEFAULT_TIMEZONE or the MCP host timezone" },
+                max_clock_drift_seconds: { type: "number", minimum: 1, maximum: 60 },
             },
             required: ["device_ids"],
         },
@@ -95,17 +105,353 @@ const TOOLS = [
     },
     {
         name: "devices_clear_proxy",
-        description: "Elimina y verifica todas las claves del proxy global en varios dispositivos",
+        description: "Libera la ruta nombrada activa y deja un único dispositivo canario sin proxy global",
         inputSchema: {
             type: "object",
             properties: {
-                device_ids: { type: "array", items: { type: "number" }, minItems: 1 },
+                device_ids: { type: "array", items: { type: "number" }, minItems: 1, maxItems: 1 },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
             },
-            required: ["device_ids"],
+            required: ["device_ids", "confirm", "idempotency_key"],
+        },
+    },
+    {
+        name: "device_command",
+        description: "Runs one explicit canary-full ADB command on one named device; destructive commands require confirm=true",
+        inputSchema: {
+            type: "object",
+            properties: {
+                device_id: { type: "number" },
+                command: {
+                    type: "string",
+                    enum: [
+                        "OPEN_APP", "GOTO_URL", "CLICK_BY_TEXT", "CLICK_BY_ID", "SET_TEXT", "SCROLL", "SWIPE",
+                        "PRESS_BACK", "PRESS_HOME", "PLAY_MEDIA", "PAUSE_MEDIA", "WAIT_FOR_ELEMENT", "CAPTURE_SCREEN",
+                        "DEVICE_HEALTH", "DEVICE_NETWORK_STATUS", "CHECK_IP", "TAP_XY", "INPUT_KEYEVENT", "TYPE_TEXT",
+                        "START_ACTIVITY", "FORCE_STOP", "GRANT_PERMISSION", "SETTINGS_GET", "SCREEN_ON", "SCREEN_OFF",
+                        "UNLOCK", "KEEP_AWAKE", "SET_TIME_AUTO", "SET_TIMEZONE", "GET_TIME", "DEVICE_STABILIZE",
+                        "READ_SCREEN_TEXT", "SCREEN_RECORD", "PULL_FILE", "CLEAR_APP", "UNINSTALL_APP", "INSTALL_APK",
+                        "SETTINGS_PUT", "REBOOT", "MONKEY", "PUSH_FILE"
+                    ]
+                },
+                params: { type: "object", additionalProperties: true },
+                confirm: { type: "boolean" },
+            },
+            required: ["device_id", "command", "confirm"],
         },
     },
 
     // Proxy tools
+    // Supervised lab controls
+    {
+        name: "lab_status",
+        description: "Shows canary scope, halt state, and whether Hermes is disabled",
+        inputSchema: { type: "object", properties: {} },
+    },
+    {
+        name: "configure_lab_canary",
+        description: "Selects the single approved canary device; requires explicit confirmation",
+        inputSchema: {
+            type: "object",
+            properties: {
+                canary_device_id: { type: "number" },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
+            },
+            required: ["canary_device_id", "confirm", "idempotency_key"],
+        },
+    },
+    {
+        name: "emergency_stop",
+        description: "Stops new work, requests cancellation of running tasks, and disables schedules; it does not clear a device proxy",
+        inputSchema: {
+            type: "object",
+            properties: {
+                reason: { type: "string" },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
+            },
+            required: ["reason", "confirm", "idempotency_key"],
+        },
+    },
+    {
+        name: "resume_lab",
+        description: "Clears the application halt after operator review; schedules remain disabled",
+        inputSchema: {
+            type: "object",
+            properties: {
+                reason: { type: "string" },
+                confirm_resume: { type: "boolean" },
+                idempotency_key: { type: "string" },
+            },
+            required: ["reason", "confirm_resume", "idempotency_key"],
+        },
+    },
+
+    // Credential-free stable proxy routes
+    {
+        name: "list_proxy_routes",
+        description: "Lists stable Proxy Orch route IDs without provider credentials",
+        inputSchema: {
+            type: "object",
+            properties: {
+                health_state: { type: "string" },
+                assigned_device_id: { type: "number" },
+            },
+        },
+    },
+    {
+        name: "inspect_proxy_route",
+        description: "Inspects one stable Proxy Orch route and its active assignment",
+        inputSchema: {
+            type: "object",
+            properties: { route_id: { type: "string" } },
+            required: ["route_id"],
+        },
+    },
+    {
+        name: "enroll_proxy_route",
+        description: "Registers credential-free route metadata for an existing Proxy Orch listener",
+        inputSchema: {
+            type: "object",
+            properties: {
+                route_id: { type: "string" },
+                provider: { type: "string" },
+                internal_host: { type: "string" },
+                internal_port: { type: "number" },
+                protocol: { type: "string", enum: ["HTTP", "HTTPS", "SOCKS5"] },
+                country: { type: "string" },
+                region: { type: "string" },
+                city: { type: "string" },
+                classification: { type: "string", enum: ["dedicated_static"] },
+                expected_public_ip: { type: "string" },
+                assigned_fleet_vlan: { type: "number", enum: [60, 61] },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
+            },
+            required: ["route_id", "provider", "internal_host", "internal_port", "protocol", "classification", "confirm", "idempotency_key"],
+        },
+    },
+    {
+        name: "test_proxy_route",
+        description: "Tests a Proxy Orch listener from the named canary when device_id is provided; otherwise tests desktop TCP reachability",
+        inputSchema: {
+            type: "object",
+            properties: {
+                route_id: { type: "string" },
+                device_id: { type: "number" },
+                timeout_ms: { type: "number", minimum: 250, maximum: 10000 },
+                idempotency_key: { type: "string" },
+                confirm: { type: "boolean" },
+            },
+            required: ["route_id", "confirm", "idempotency_key"],
+        },
+    },
+    {
+        name: "assign_proxy_route",
+        description: "Applies one stable route to the named canary through guarded ADB, then records the active assignment",
+        inputSchema: {
+            type: "object",
+            properties: {
+                route_id: { type: "string" },
+                device_id: { type: "number" },
+                expected_previous_route_id: { anyOf: [{ type: "string" }, { type: "null" }] },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
+            },
+            required: ["route_id", "device_id", "expected_previous_route_id", "confirm", "idempotency_key"],
+        },
+    },
+    {
+        name: "release_proxy_route",
+        description: "Releases the expected canary route and either restores the prior Android proxy or goes direct",
+        inputSchema: {
+            type: "object",
+            properties: {
+                route_id: { type: "string" },
+                device_id: { type: "number" },
+                restore_mode: { type: "string", enum: ["previous", "direct"] },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
+            },
+            required: ["route_id", "device_id", "confirm", "idempotency_key"],
+        },
+    },
+    {
+        name: "rotate_proxy_route",
+        description: "Rotates one named device from its expected current stable route to a verified free route, verifies egress, and rolls back on mismatch",
+        inputSchema: {
+            type: "object",
+            properties: {
+                device_id: { type: "number" },
+                expected_previous_route_id: { type: "string" },
+                target_route_id: { type: "string", description: "Optional explicit free route; omitted selects the next route deterministically" },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
+            },
+            required: ["device_id", "expected_previous_route_id", "confirm", "idempotency_key"],
+        },
+    },
+    {
+        name: "set_device_proxy_direct",
+        description: "Releases any active named route and clears Android's global proxy for one named canary",
+        inputSchema: {
+            type: "object",
+            properties: {
+                device_id: { type: "number" },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
+            },
+            required: ["device_id", "confirm", "idempotency_key"],
+        },
+    },
+    {
+        name: "verify_device_egress",
+        description: "Compares device-observed egress with the route expected IP and halts the lab on mismatch",
+        inputSchema: {
+            type: "object",
+            properties: {
+                route_id: { type: "string" },
+                device_id: { type: "number" },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
+            },
+            required: ["route_id", "device_id", "confirm", "idempotency_key"],
+        },
+    },
+
+    // Credential-free account profiles
+    {
+        name: "list_account_profiles",
+        description: "Lists account profile metadata without passwords, TOTP values, or secret references",
+        inputSchema: {
+            type: "object",
+            properties: {
+                platform: { type: "string" },
+                status: { type: "string" },
+                device_id: { type: "number" },
+            },
+        },
+    },
+    {
+        name: "inspect_account_profile",
+        description: "Inspects one credential-free account profile",
+        inputSchema: {
+            type: "object",
+            properties: { account_id: { type: "number" } },
+            required: ["account_id"],
+        },
+    },
+    {
+        name: "enroll_account_profile",
+        description: "Creates account metadata linked to a restricted local secret reference; secret values are rejected",
+        inputSchema: {
+            type: "object",
+            properties: {
+                platform: { type: "string" },
+                username: { type: "string" },
+                email: { type: "string" },
+                secret_ref: { type: "string" },
+                notes: { type: "string" },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
+            },
+            required: ["platform", "secret_ref", "confirm", "idempotency_key"],
+        },
+    },
+    {
+        name: "assign_account_profile",
+        description: "Assigns one profile to the named canary after checking the previous active profile",
+        inputSchema: {
+            type: "object",
+            properties: {
+                account_id: { type: "number" },
+                device_id: { type: "number" },
+                expected_previous_account_id: { anyOf: [{ type: "number" }, { type: "null" }] },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
+            },
+            required: ["account_id", "device_id", "expected_previous_account_id", "confirm", "idempotency_key"],
+        },
+    },
+    {
+        name: "release_account_profile",
+        description: "Releases the expected active profile from the named canary",
+        inputSchema: {
+            type: "object",
+            properties: {
+                account_id: { type: "number" },
+                device_id: { type: "number" },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
+            },
+            required: ["account_id", "device_id", "confirm", "idempotency_key"],
+        },
+    },
+    {
+        name: "inspect_google_accounts",
+        description: "Returns only the Google account count and enrollment/rotation state for a named device; identifiers are not exposed",
+        inputSchema: {
+            type: "object",
+            properties: { device_id: { type: "number" } },
+            required: ["device_id"],
+        },
+    },
+    {
+        name: "start_google_account_enrollment",
+        description: "Opens Android's native Google account enrollment UI; credentials remain on the device and owner interaction is required",
+        inputSchema: {
+            type: "object",
+            properties: {
+                device_id: { type: "number" },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
+            },
+            required: ["device_id", "confirm", "idempotency_key"],
+        },
+    },
+    {
+        name: "verify_google_account_enrollment",
+        description: "Checks whether the sanitized Google account count increased after supervised enrollment",
+        inputSchema: {
+            type: "object",
+            properties: {
+                device_id: { type: "number" },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
+            },
+            required: ["device_id", "confirm", "idempotency_key"],
+        },
+    },
+    {
+        name: "set_google_account_rotation",
+        description: "Enables or disables owner-supervised Google account rotation for one named device",
+        inputSchema: {
+            type: "object",
+            properties: {
+                device_id: { type: "number" },
+                enabled: { type: "boolean" },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
+            },
+            required: ["device_id", "enabled", "confirm", "idempotency_key"],
+        },
+    },
+    {
+        name: "open_google_account_rotation",
+        description: "Opens Android's native Google account settings when rotation is allowed and at least two accounts exist; no automatic OS switch is claimed",
+        inputSchema: {
+            type: "object",
+            properties: {
+                device_id: { type: "number" },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
+            },
+            required: ["device_id", "confirm", "idempotency_key"],
+        },
+    },
+
     {
         name: "proxies_list",
         description: "Lista el pool de proxies, capacidad y asignaciones sin revelar contraseñas",
@@ -475,6 +821,15 @@ async function apiPost(endpoint: string, body?: object) {
     }
 }
 
+async function apiPut(endpoint: string, body?: object) {
+    try {
+        const response = await api.put(endpoint, body);
+        return ok(response.data);
+    } catch (error: any) {
+        return fail(error);
+    }
+}
+
 async function apiDelete(endpoint: string) {
     try {
         const response = await api.delete(endpoint);
@@ -491,7 +846,12 @@ async function apiDelete(endpoint: string) {
 async function callTool(name: string, params: any) {
     switch (name) {
         case "devices_list":
-            return apiGet("/devices");
+            return apiGet("/devices", {
+                page: params.page || 1,
+                per_page: params.per_page || 200,
+                status: params.status,
+                search: params.search,
+            });
         case "devices_get_status":
             return apiGet(`/devices/${params.device_id}`);
         case "devices_register":
@@ -507,21 +867,75 @@ async function callTool(name: string, params: any) {
                     screen_timeout_minutes: params.screen_timeout_minutes,
                     animation_scale: params.animation_scale,
                     sync_time: params.sync_time,
+                    clock_source: params.clock_source,
                     timezone: params.timezone,
+                    max_clock_drift_seconds: params.max_clock_drift_seconds,
                 },
             });
         case "devices_network_status":
             return apiPost("/devices/batch-command", {
+
                 device_ids: params.device_ids,
                 command: "DEVICE_NETWORK_STATUS",
                 params: {},
             });
         case "devices_clear_proxy":
+            if (params.confirm !== true) throw new Error("confirm=true required");
+            if (!Array.isArray(params.device_ids) || params.device_ids.length !== 1) throw new Error("Exactly one device_id is required");
+            return apiPost(`/devices/${params.device_ids[0]}/proxy-control/direct`, params);
+        case "device_command":
+            if (params.confirm !== true) throw new Error("confirm=true required");
             return apiPost("/devices/batch-command", {
-                device_ids: params.device_ids,
-                command: "CLEAR_PROXY",
-                params: {},
+                device_ids: [params.device_id], command: params.command,
+                params: { ...(params.params || {}), confirm: true },
             });
+        case "lab_status":
+            return apiGet("/lab/status");
+        case "configure_lab_canary":
+            return apiPut("/lab/config", { ...params, lab_mode_enabled: true, hermes_enabled: false });
+        case "emergency_stop":
+            return apiPost("/lab/emergency-stop", params);
+        case "resume_lab":
+            return apiPost("/lab/resume", params);
+        case "list_proxy_routes":
+            return apiGet("/proxy-routes", params);
+        case "inspect_proxy_route":
+            return apiGet(`/proxy-routes/${params.route_id}`);
+        case "enroll_proxy_route":
+            return apiPost("/proxy-routes", params);
+        case "test_proxy_route":
+            return apiPost(`/proxy-routes/${params.route_id}/test`, params);
+        case "assign_proxy_route":
+            return apiPost(`/proxy-routes/${params.route_id}/assign`, params);
+        case "release_proxy_route":
+            return apiPost(`/proxy-routes/${params.route_id}/release`, params);
+        case "rotate_proxy_route":
+            return apiPost(`/devices/${params.device_id}/proxy-route/rotate`, params);
+        case "set_device_proxy_direct":
+            return apiPost(`/devices/${params.device_id}/proxy-control/direct`, params);
+        case "verify_device_egress":
+            return apiPost(`/proxy-routes/${params.route_id}/verify-device-egress`, params);
+        case "list_account_profiles":
+            return apiGet("/account-profiles", { platform: params.platform, status: params.status, device_id: params.device_id });
+        case "inspect_account_profile":
+            return apiGet(`/account-profiles/${params.account_id}`);
+        case "enroll_account_profile":
+            return apiPost("/account-profiles/enroll", params);
+        case "assign_account_profile":
+            return apiPost(`/account-profiles/${params.account_id}/assign`, params);
+        case "release_account_profile":
+            return apiPost(`/account-profiles/${params.account_id}/release`, params);
+        case "inspect_google_accounts":
+            return apiGet(`/devices/${params.device_id}/google-accounts`);
+        case "start_google_account_enrollment":
+            return apiPost(`/devices/${params.device_id}/google-accounts/enrollment/start`, params);
+        case "verify_google_account_enrollment":
+            return apiPost(`/devices/${params.device_id}/google-accounts/enrollment/verify`, params);
+        case "set_google_account_rotation":
+            return apiPut(`/devices/${params.device_id}/google-accounts/rotation`, params);
+        case "open_google_account_rotation":
+            return apiPost(`/devices/${params.device_id}/google-accounts/rotation/open`, params);
+
         case "proxies_list":
             return apiGet("/proxies", { status: params.status, country: params.country });
         case "proxies_create":

@@ -16,6 +16,12 @@ Thumbs.db
 *.keystore
 *.p12
 *.pem
+lab-secrets/
+**/lab-secrets/
+proxy-endpoints.private.*
+dedicated-ip-export.private.*
+account-profiles.private.*
+*.secret
 
 # Dependencias y artefactos PHP
 backend/vendor/
@@ -63,3 +69,11 @@ panda/
 
 # Salida de la skill graphify (no es parte de la app)
 graphify-out/
+# Machine-specific fleet lab state (public repo)
+fleet-allowlist.txt
+Start-MCP-*.cmd
+docs/evidence/
+docs/proxy-routes/
+scripts/fleet/xpace-canary-*.ps1
+scripts/proxy-orch/install-fleet*.sh
+scripts/proxy-orch/rollback-fleet*.sh

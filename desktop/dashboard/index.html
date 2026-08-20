@@ -5,9 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Bsolutions Control App</title>
     <meta name="theme-color" content="#4f46e5">
+    <script src="/dashboard/js/theme.js?v=20260816-v1"></script>
     <link rel="icon" href="/dashboard/icons/mcp-icon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
     <link rel="stylesheet" href="/dashboard/css/dashboard.css?v=20260819-v4">
+    <link rel="stylesheet" href="/dashboard/css/themes.css?v=20260819-v2">
 </head>
 <body class="bsolutions-theme">
 
@@ -22,6 +24,14 @@
         </div>
 
         <div class="top-header-right">
+            <button type="button" id="themeToggle" class="theme-toggle" role="switch" aria-checked="true"
+                    onclick="toggleColorTheme()" title="Desactivar modo oscuro">
+                <span id="themeToggleIcon" class="theme-toggle-icon" aria-hidden="true">🌙</span>
+                <span id="themeToggleLabel" class="theme-toggle-label">Oscuro</span>
+                <span class="theme-toggle-track" aria-hidden="true">
+                    <span class="theme-toggle-thumb"></span>
+                </span>
+            </button>
             <div id="connectionStatus" class="connection-status">
                 <span class="status-dot"></span> Conectado
             </div>
@@ -399,6 +409,7 @@
     <script src="/dashboard/js/mirror-client.js?v=20260819-v2"></script>
     <script src="/dashboard/js/dashboard.js?v=20260725-v8"></script>
     <script src="/dashboard/js/scripts-ui.js?v=20260819-v4"></script>
+    <script src="/dashboard/js/fleet-lab-controls.js?v=20260819-v2"></script>
     <script src="/dashboard/js/routines.js?v=20260725-v8"></script>
     <script src="/dashboard/js/monitor-ui.js?v=20260725-v6"></script>
     <script src="/dashboard/js/views-ui.js?v=20260725-v7"></script>

@@ -21,7 +21,7 @@ test('embedded server migrates its schema and protects paginated API routes', as
 
   t.after(() => db.close());
 
-  const requiredTables = ['devices', 'accounts', 'proxies', 'proxy_assignments', 'view_campaigns', 'view_sessions'];
+  const requiredTables = ['devices', 'accounts', 'proxies', 'proxy_assignments', 'lab_control_state', 'audit_events', 'proxy_routes', 'proxy_route_assignments', 'view_campaigns', 'view_sessions'];
   for (const table of requiredTables) {
     assert.equal(
       db.get("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name=?", [table]).count,
@@ -61,6 +61,13 @@ test('embedded server migrates its schema and protects paginated API routes', as
     }),
   });
   assert.equal(created.status, 201);
+  const disableLab = await fetch(`${baseUrl}/lab/config`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ confirm: true, lab_mode_enabled: false, hermes_enabled: false }),
+  });
+  assert.equal(disableLab.status, 200);
+
 
   const devicesResponse = await fetch(`${baseUrl}/devices?per_page=10`, { headers });
   const devices = await devicesResponse.json();

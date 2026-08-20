@@ -5,10 +5,11 @@
 const http = require('http');
 const crypto = require('crypto');
 const { now } = require('./db');
+const labControl = require('./lab_control');
 
 let DB = null;
 let ROUTER_PORT = 6011;
-function init(db, routerPort) { DB = db; ROUTER_PORT = routerPort; }
+function init(db, routerPort) { DB = db; ROUTER_PORT = routerPort; labControl.init(db); }
 
 const sleep = ms => new Promise(r => setTimeout(r, Math.min(ms, 120000)));
 const uuid = () => crypto.randomUUID();
@@ -47,6 +48,16 @@ function routerDispatch(serial, command, params) {
 
 // ---- executor: traduce un paso de rutina y lo ejecuta ----
 async function executeStep(device, step) {
+  try {
+    const control = labControl.assertOperational();
+    if (control.lab_mode_enabled) {
+      labControl.assertDeviceAllowed(device.id);
+      const validationErrors = labControl.validateStep(step);
+      if (validationErrors.length) return { success: false, message: validationErrors.join('; '), data: null };
+    }
+  } catch (error) {
+    return { success: false, message: error.message, data: null };
+  }
   const t = step.type;
   // Sustituye {{account.username|password|email|totp|...}} con la cuenta activa del dispositivo.
   try { const accounts = require('./accounts'); step = accounts.resolveVars(device, step); } catch (_) {}
@@ -179,8 +190,21 @@ function selectDevices({ groupId = null, deviceIds = null, workflowId = null }) 
 
 // ---- dispatcher: ejecuta una rutina sobre dispositivos ----
 async function dispatchWorkflow(workflow, { groupId = null, deviceIds = null, params = {} } = {}) {
+  let control;
+  try { control = labControl.assertOperational(); }
+  catch (error) { return { task: null, devices_assigned: 0, message: error.message }; }
   if (!workflow || workflow.status !== 'active') return { task: null, devices_assigned: 0, message: 'La rutina debe estar activa' };
   const steps = safeJson(workflow.steps, []);
+  if (control.lab_mode_enabled) {
+    const validation = labControl.validateWorkflowSteps(steps);
+    if (!validation.valid) return { task: null, devices_assigned: 0, message: validation.errors.join('; ') };
+    if (groupId != null) return { task: null, devices_assigned: 0, message: 'group_id is not allowed during the canary' };
+    if (!Array.isArray(deviceIds) || deviceIds.length !== 1) {
+      return { task: null, devices_assigned: 0, message: 'The canary requires exactly one explicit device_id' };
+    }
+    try { labControl.assertDeviceAllowed(Number(deviceIds[0])); }
+    catch (error) { return { task: null, devices_assigned: 0, message: error.message }; }
+  }
   const devices = selectDevices({ groupId, deviceIds, workflowId: workflow.id });
   if (!devices.length) return { task: null, devices_assigned: 0, message: 'No hay dispositivos online' };
 
@@ -204,28 +228,41 @@ async function dispatchWorkflow(workflow, { groupId = null, deviceIds = null, pa
 // (dependen del estado de la pantalla), pero varios dispositivos corren a la vez.
 async function runDeviceSteps(taskId, steps, d) {
   DB.run('UPDATE task_assignments SET status=?, started_at=? WHERE task_id=? AND device_id=?', ['running', now(), taskId, d.id]);
-  let failed = false, lastMsg = null;
+  let failed = false, cancelled = false, lastMsg = null;
   let settings = null; try { settings = require('./settings'); } catch (_) {}
   for (let i = 0; i < steps.length; i++) {
+    const task = DB.get('SELECT status FROM tasks WHERE id=?', [taskId]);
+    const control = labControl.state();
+    if (!task || ['cancel_requested', 'cancelled'].includes(task.status) || control.halted) {
+      cancelled = true;
+      lastMsg = control.halted ? (control.halt_reason || 'Emergency stop') : 'Cancellation requested';
+      break;
+    }
     const step = steps[i];
     let r;
     try { r = await executeStep(d, step); }
     catch (e) { r = { success: false, message: e.message, data: {} }; }
     DB.run('INSERT INTO execution_logs(task_id,device_serial,command_type,success,message,result_data,timestamp,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
-      [taskId, d.serial_number, step.type, r.success ? 1 : 0, r.message, JSON.stringify(r.data ?? {}), now(), now(), now()]);
+      [taskId, d.serial_number, step.type, r.success ? 1 : 0, r.message, JSON.stringify(labControl.sanitize(r.data ?? {})), now(), now(), now()]);
     if (!r.success) { failed = true; lastMsg = r.message; break; }
-    // Pausa aleatoria "humana" entre pasos (excepto tras el último).
     if (settings && i < steps.length - 1) { const d2 = settings.interStepDelayMs(); if (d2 > 0) await sleep(d2); }
   }
-  DB.run('UPDATE task_assignments SET status=?, error_message=?, completed_at=? WHERE task_id=? AND device_id=?', [failed ? 'failed' : 'completed', failed ? lastMsg : null, now(), taskId, d.id]);
-  DB.run('UPDATE devices SET status=?, current_task_id=NULL WHERE id=?', ['online', d.id]);
-  return { device: d, failed, lastMsg };
+  const finalStatus = cancelled ? 'cancelled' : (failed ? 'failed' : 'completed');
+  DB.run('UPDATE task_assignments SET status=?, error_message=?, completed_at=? WHERE task_id=? AND device_id=?', [finalStatus, lastMsg, now(), taskId, d.id]);
+  DB.run('UPDATE devices SET status=?, current_task_id=NULL WHERE id=? AND current_task_id=?', ['online', d.id, taskId]);
+  return { device: d, failed, cancelled, lastMsg };
 }
 
 // Lanza la rutina en TODOS los dispositivos en paralelo (throughput ~×N en una
 // granja). El estado de la tarea agrega el resultado de cada dispositivo.
 async function runTask(taskId, workflow, steps, devices) {
   const results = await Promise.all(devices.map(d => runDeviceSteps(taskId, steps, d)));
+  const cancellations = results.filter(r => r.cancelled);
+  if (cancellations.length) {
+    DB.run('UPDATE tasks SET status=?,error_message=?,completed_at=?,updated_at=? WHERE id=?',
+      ['cancelled', cancellations[0].lastMsg || 'Cancellation requested', now(), now(), taskId]);
+    return;
+  }
   const failures = results.filter(r => r.failed);
   if (failures.length) {
     const names = failures.map(f => f.device.serial_number).join(', ');
@@ -239,6 +276,8 @@ async function runTask(taskId, workflow, steps, devices) {
 // ---- scheduleRunner ----
 function hm(date) { return date.toTimeString().slice(0, 5); }
 function scheduleTick() {
+  const control = labControl.state();
+  if (control.halted || control.lab_mode_enabled) return;
   const d = new Date();
   const cur = hm(d), dow = d.getDay();
   const list = DB.all("SELECT * FROM schedules WHERE is_active=1");
@@ -271,4 +310,4 @@ function scheduleTick() {
 
 function safeJson(v, def) { if (v == null) return def; if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch { return def; } }
 
-module.exports = { init, executeStep, dispatchWorkflow, scheduleTick, routerDispatch, safeJson };
+module.exports = { init, executeStep, dispatchWorkflow, scheduleTick, routerDispatch, safeJson, runDeviceSteps, validateWorkflowSteps: labControl.validateWorkflowSteps };

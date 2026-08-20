@@ -1,0 +1,205 @@
+/* Persistent light/dark appearance for the local MCP Desktop dashboard. */
+html[data-theme="light"] {
+    color-scheme: light;
+    --theme-surface-2: #f8fafc;
+    --theme-surface-3: #f1f5f9;
+    --theme-input-bg: #ffffff;
+    --theme-input-text: #1f2937;
+}
+
+html[data-theme="dark"] {
+    color-scheme: dark;
+    --bg-main: #080d18;
+    --panel-bg: #111827;
+    --header-bg: #0f172a;
+    --sidebar-bg: #0f172a;
+    --border-color: #293548;
+    --text-dark: #e8edf5;
+    --text-muted: #a7b0c0;
+    --text-light: #7f8da3;
+    --primary: #818cf8;
+    --primary-hover: #a5b4fc;
+    --theme-surface-2: #151e2d;
+    --theme-surface-3: #1b2637;
+    --theme-input-bg: #0b1220;
+    --theme-input-text: #e8edf5;
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.32);
+    --shadow-md: 0 8px 20px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 14px 32px rgba(0, 0, 0, 0.38);
+    --shadow-float: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+
+.theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 34px;
+    padding: 5px 8px 5px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background: var(--panel-bg);
+    color: var(--text-dark);
+    font-size: 12px;
+    font-weight: 650;
+    cursor: pointer;
+    box-shadow: var(--shadow-sm);
+    transition: background .18s ease, border-color .18s ease, transform .18s ease;
+}
+.theme-toggle:hover { border-color: var(--primary); transform: translateY(-1px); }
+.theme-toggle:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.theme-toggle-icon { width: 16px; text-align: center; }
+.theme-toggle-track {
+    position: relative;
+    width: 30px;
+    height: 17px;
+    border-radius: 999px;
+    background: #cbd5e1;
+    transition: background .18s ease;
+}
+.theme-toggle-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: #ffffff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .35);
+    transition: transform .18s ease;
+}
+.theme-toggle[aria-checked="true"] .theme-toggle-track { background: #6366f1; }
+.theme-toggle[aria-checked="true"] .theme-toggle-thumb { transform: translateX(13px); }
+
+html[data-theme="dark"] body.bsolutions-theme,
+html[data-theme="dark"] .app-layout,
+html[data-theme="dark"] .main-content { background: var(--bg-main); color: var(--text-dark); }
+
+html[data-theme="dark"] .brand-name { color: #7dd3fc; }
+html[data-theme="dark"] .brand-logo { color: #60a5fa; }
+html[data-theme="dark"] .version-badge { background: #0c4a6e; color: #bae6fd; }
+html[data-theme="dark"] .icon-header-btn:hover,
+html[data-theme="dark"] .nav-item:hover { background: var(--theme-surface-3); }
+html[data-theme="dark"] .nav-item.active { background: #252a54; color: #c7d2fe; }
+
+html[data-theme="dark"] :is(
+    .sub-tabs,
+    .matrix-top-bar,
+    .view-mode-toggle,
+    .bottom-status-bar,
+    .rt-head,
+    .rt-col-head,
+    .vw-stats,
+    .vw-detail-stats
+) { background: var(--theme-surface-2); border-color: var(--border-color); }
+
+html[data-theme="dark"] :is(
+    .custom-modal-box,
+    .floating-mirror-window,
+    .proxy-modal,
+    .rt-modal,
+    .mcp-modal,
+    .mcp-notif-panel
+) { background: var(--panel-bg); color: var(--text-dark); border-color: var(--border-color); }
+
+html[data-theme="dark"] :is(
+    input:not([type="checkbox"]):not([type="radio"]),
+    select,
+    textarea,
+    .search-input,
+    .modal-input
+) {
+    background: var(--theme-input-bg);
+    color: var(--theme-input-text);
+    border-color: #3a475b;
+}
+html[data-theme="dark"] :is(input, textarea)::placeholder { color: #6f7d92; }
+html[data-theme="dark"] :is(input, select, textarea):focus { border-color: #818cf8; outline-color: #818cf8; }
+
+html[data-theme="dark"] :is(
+    .sub-tab.active,
+    .page-pill:not(.active),
+    .btn-tool-sm,
+    .btn-icon-tool,
+    .proxy-btn,
+    .btn-secondary,
+    .btn-danger,
+    .rt-btn:not(.primary):not(.danger),
+    .rt-step-btns button,
+    .mcp-bell-btn,
+    .mcp-mini,
+    .phone-card-flag button
+) {
+    background: var(--theme-surface-3);
+    color: var(--text-dark);
+    border-color: #3a475b;
+}
+html[data-theme="dark"] :is(.btn-tool-sm, .btn-icon-tool, .proxy-btn, .rt-btn, .mcp-mini):hover {
+    background: #243248;
+}
+html[data-theme="dark"] .btn-danger { color: #fca5a5; border-color: #7f1d1d; }
+
+html[data-theme="dark"] :is(
+    .proxy-status,
+    .rt-list-item,
+    .rt-step,
+    .rt-chip,
+    .rt-hermes-note,
+    .rt-hermes-status-grid > div,
+    .mcp-notif,
+    .acc-badge.s-unused,
+    .hw-chip,
+    .rt-editor code,
+    .vw-prev-chip
+) {
+    background: var(--theme-surface-2);
+    color: var(--text-dark);
+    border-color: var(--border-color);
+}
+html[data-theme="dark"] .rt-list-item:hover,
+html[data-theme="dark"] .rt-list-item.active { background: #202b40; border-color: #4f5f78; }
+html[data-theme="dark"] .rt-editor { background: var(--panel-bg); color: var(--text-dark); }
+
+html[data-theme="dark"] :is(
+    .proxy-modal label,
+    .mcp-modal label,
+    .mcp-notif-msg,
+    .vw-stat .vw-n,
+    .vw-h4,
+    .custom-modal-box h3,
+    .rt-editor h3,
+    .rt-editor h4
+) { color: var(--text-dark); }
+html[data-theme="dark"] :is(
+    .proxy-modal-sub,
+    .proxy-note,
+    .mcp-modal .mcp-sub,
+    .sub-tab-hint,
+    .vw-stat .vw-l,
+    .vw-prev-head,
+    .rt-hint,
+    .rt-hermes-status-grid span
+) { color: var(--text-muted); }
+
+html[data-theme="dark"] .mcp-notif-head,
+html[data-theme="dark"] .rt-head,
+html[data-theme="dark"] .rt-col-head,
+html[data-theme="dark"] .rt-editor-actions,
+html[data-theme="dark"] .matrix-search-bar { border-color: var(--border-color); }
+
+html[data-theme="dark"] .mcp-notif.sev-critical,
+html[data-theme="dark"] .phone-card-flag { background: #32191f; border-color: #7f1d1d; }
+html[data-theme="dark"] .mcp-notif.sev-warning { background: #332615; border-color: #92400e; }
+html[data-theme="dark"] .phone-card-flag span { color: #fca5a5; }
+html[data-theme="dark"] .proxy-badge.on,
+html[data-theme="dark"] .acc-badge.s-active { background: #123524; color: #86efac; }
+html[data-theme="dark"] .proxy-badge.off { background: #202b3c; color: #b1bdcc; }
+html[data-theme="dark"] .acc-badge.s-banned,
+html[data-theme="dark"] .hw-chip.low { background: #3a191d; color: #fca5a5; }
+html[data-theme="dark"] .acc-badge.s-cooldown { background: #392b13; color: #fcd34d; }
+
+html[data-theme="dark"] * { scrollbar-color: #42516a #111827; }
+html[data-theme="dark"] ::selection { background: #4338ca; color: #ffffff; }
+
+@media (max-width: 720px) {
+    .theme-toggle-label { display: none; }
+}

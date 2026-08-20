@@ -15,12 +15,19 @@ const proxies = require('./server/proxies');
 const hermes = require('./server/hermes');
 const settings = require('./server/settings');
 const views = require('./server/views');
+const labControl = require('./server/lab_control');
 const router = require('./router');
 const adb = require('./adb');
 const mirror = require('./adb/mirror');
 
 const HTTP_PORT = 8733;      // puerto local del backend Express embebido
 const WS_PORT = 6011;        // puerto del Command Router (WebSocket)
+
+function envFlag(name, fallback = false) {
+  const value = process.env[name];
+  if (value == null || value === '') return fallback;
+  return /^(1|true|yes)$/i.test(String(value));
+}
 
 // Carpeta de datos fijada explícitamente.
 //
@@ -156,16 +163,21 @@ app.whenReady().then(async () => {
       decrypt: accounts._dec,
       dispatch: logic.routerDispatch,
     });
-    hermes.init({
-      nodeRuntimePath: app.isPackaged
-        ? path.join(process.resourcesPath, 'node-runtime', 'node.exe')
-        : path.resolve(__dirname, 'node_modules', 'node', 'bin', 'node.exe'),
-      mcpServerPath: app.isPackaged
-        ? path.join(process.resourcesPath, 'mcp-server', 'appcontrol-mcp.cjs')
-        : path.resolve(__dirname, '..', 'mcp-server', 'bundle', 'appcontrol-mcp.cjs'),
-      tokenFile: userFile('api-token.txt'),
-      backendUrl: `http://127.0.0.1:${HTTP_PORT}/api/v1`,
-    });
+    const hermesRuntimeEnabled = envFlag('MCP_HERMES_ENABLED', false) && !envFlag('MCP_LAB_MODE', true);
+    if (hermesRuntimeEnabled) {
+      hermes.init({
+        nodeRuntimePath: app.isPackaged
+          ? path.join(process.resourcesPath, 'node-runtime', 'node.exe')
+          : path.resolve(__dirname, 'node_modules', 'node', 'bin', 'node.exe'),
+        mcpServerPath: app.isPackaged
+          ? path.join(process.resourcesPath, 'mcp-server', 'appcontrol-mcp.cjs')
+          : path.resolve(__dirname, '..', 'mcp-server', 'bundle', 'appcontrol-mcp.cjs'),
+        tokenFile: userFile('api-token.txt'),
+        backendUrl: 'http://127.0.0.1:' + HTTP_PORT + '/api/v1',
+      });
+    } else {
+      console.log('[hermes] connector disabled by startup configuration');
+    }
     settings.init(db);
     monitor.init(db, { dispatch: logic.routerDispatch });
     views.init(db);
@@ -187,6 +199,11 @@ app.whenReady().then(async () => {
       httpServer,
       adbResolver: adb.resolveAdb,
       token: apiToken,
+      authorizeSerial: serial => {
+        const device = db.get('SELECT id FROM devices WHERE adb_serial=? OR serial_number=?', [serial, serial]);
+        if (!device) return false;
+        try { labControl.assertDeviceInScope(device.id); return true; } catch (_) { return false; }
+      },
       config: { maxSize: 1024, maxFps: 30, bitRate: 4000000 },
     });
 
@@ -204,6 +221,9 @@ app.whenReady().then(async () => {
     // 4c. Monitor de baneo/captcha (opt-in): revisa la pantalla de cada dispositivo
     // según el intervalo configurado en alerts-config.json (monitor_enabled).
     monitorInterval = setInterval(() => {
+      // A lab session is canary-scoped. Never fan out background work to
+      // devices persisted in an older local database.
+      if (labControl.state().lab_mode_enabled) return;
       try {
         const cfg = alerts.raw();
         if (!cfg.monitor_enabled) return;
@@ -236,10 +256,14 @@ app.whenReady().then(async () => {
     adb.start({
       backendUrl: backendApi, backendToken: apiToken,
       db,                                        // handle abierto de SQLite: comandos como TIKTOK_ROTATE_PROXY leen su config de la BD
-      autoInstallAgent: true,                    // instala el Agente Bsolutions en los teléfonos que no lo traigan
+      autoInstallAgent: envFlag('MCP_AUTO_INSTALL_AGENT', !labControl.state().lab_mode_enabled),
       wsPort: WS_PORT,                           // para abrir el túnel `adb reverse` que deja al agente alcanzar el router
       frameMaxWidth: 0, frameQuality: 55,        // visor enfocado: resolución NATIVA (para que el toque caiga donde se hace clic) + JPEG
       thumbMaxWidth: 240, thumbQuality: 40, thumbTtlMs: 1500,  // miniaturas del muro (ligeras, escala 40+)
+      allowedSerials: String(process.env.MCP_ADB_ALLOWLIST || '').split(',').map(s => s.trim()).filter(Boolean),
+      requireAllowlist: labControl.state().lab_mode_enabled,
+      suppressStartupWrites: labControl.state().lab_mode_enabled,
+      allowNetworkScan: false,
     });
     router.setAdbTransport(adb);
 

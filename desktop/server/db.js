@@ -234,6 +234,67 @@ CREATE TABLE IF NOT EXISTS proxy_assignments (
   FOREIGN KEY(device_id) REFERENCES devices(id)
 );
 
+CREATE TABLE IF NOT EXISTS lab_control_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  lab_mode_enabled INTEGER NOT NULL DEFAULT 1,
+  halted INTEGER NOT NULL DEFAULT 0,
+  canary_device_id INTEGER,
+  hermes_enabled INTEGER NOT NULL DEFAULT 0,
+  halt_reason TEXT,
+  updated_at TEXT,
+  FOREIGN KEY(canary_device_id) REFERENCES devices(id)
+);
+
+CREATE TABLE IF NOT EXISTS audit_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  operation TEXT NOT NULL,
+  actor TEXT,
+  device_id INTEGER,
+  route_id TEXT,
+  idempotency_key TEXT UNIQUE,
+  result TEXT NOT NULL,
+  details TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS proxy_routes (
+  route_id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  internal_host TEXT NOT NULL,
+  internal_port INTEGER NOT NULL,
+  protocol TEXT NOT NULL,
+  country TEXT,
+  region TEXT,
+  city TEXT,
+  classification TEXT NOT NULL DEFAULT 'dedicated_static',
+  expected_public_ip TEXT,
+  assigned_device_id INTEGER,
+  assigned_fleet_vlan INTEGER,
+  health_state TEXT NOT NULL DEFAULT 'unverified',
+  observed_public_ip TEXT,
+  last_verification_time TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(assigned_device_id) REFERENCES devices(id)
+);
+
+CREATE TABLE IF NOT EXISTS proxy_route_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  route_id TEXT NOT NULL,
+  device_id INTEGER NOT NULL,
+  previous_route_id TEXT,
+  previous_proxy_state TEXT,
+  state TEXT NOT NULL DEFAULT 'pending_apply',
+  active INTEGER NOT NULL DEFAULT 1,
+  idempotency_key TEXT UNIQUE,
+  assigned_at TEXT NOT NULL,
+  released_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(route_id) REFERENCES proxy_routes(route_id),
+  FOREIGN KEY(device_id) REFERENCES devices(id)
+);
+
 CREATE TABLE IF NOT EXISTS view_campaigns (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -434,6 +495,13 @@ CREATE INDEX IF NOT EXISTS idx_proxies_status ON proxies(status);
 CREATE INDEX IF NOT EXISTS idx_proxy_assignments_proxy_active ON proxy_assignments(proxy_id, active);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_assignments_device_active
   ON proxy_assignments(device_id) WHERE active = 1;
+CREATE INDEX IF NOT EXISTS idx_audit_events_operation ON audit_events(operation, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_routes_internal_listener
+  ON proxy_routes(internal_host, internal_port);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_route_assignments_device_active
+  ON proxy_route_assignments(device_id) WHERE active = 1;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_route_assignments_route_active
+  ON proxy_route_assignments(route_id) WHERE active = 1;
 `;
 
 const DEVICE_COLUMNS = {
@@ -455,6 +523,10 @@ const DEVICE_COLUMNS = {
   health_at: 'TEXT',
   timezone: 'TEXT',
   time_synced_at: 'TEXT',
+};
+
+const ACCOUNT_COLUMNS = {
+  secret_ref: 'TEXT',
 };
 
 function now() {
@@ -555,6 +627,10 @@ function openNative(file) {
   for (const [name, def] of Object.entries(DEVICE_COLUMNS)) {
     if (!cols.has(name)) native.exec(`ALTER TABLE devices ADD COLUMN ${name} ${def}`);
   }
+  const accountCols = new Set(native.prepare('PRAGMA table_info(accounts)').all().map(c => c.name));
+  for (const [name, def] of Object.entries(ACCOUNT_COLUMNS)) {
+    if (!accountCols.has(name)) native.exec(`ALTER TABLE accounts ADD COLUMN ${name} ${def}`);
+  }
   migrarNombresDeComando(sql => native.prepare(sql).run().changes);
   return {
     file, native, closed: false, engine: 'better-sqlite3',
@@ -603,6 +679,7 @@ async function openSqlJs(file = ':memory:') {
 
   native.run(SCHEMA);
   ensureColumns(native, 'devices', DEVICE_COLUMNS);
+  ensureColumns(native, 'accounts', ACCOUNT_COLUMNS);
   migrarNombresDeComando(sql => { native.run(sql); return native.getRowsModified(); });
 
   const db = {

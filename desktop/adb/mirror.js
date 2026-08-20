@@ -34,6 +34,7 @@ let CONFIG = {
 const sessions = new Map();   // serial -> Session
 let wss = null;
 let resolveAdbPath = () => CONFIG.adbPath || 'adb';
+let authorizeMirrorSerial = () => true;
 
 // ------------------------------------------------------------------ utilidades
 
@@ -360,9 +361,10 @@ async function getSession(serial) {
 
 // Se engancha al servidor HTTP existente (8733) en la ruta /mirror, para no abrir
 // otro puerto ni duplicar la autenticación.
-function init({ httpServer, adbResolver, token, config } = {}) {
+function init({ httpServer, adbResolver, token, config, authorizeSerial } = {}) {
   Object.assign(CONFIG, config || {});
   if (adbResolver) resolveAdbPath = adbResolver;
+  authorizeMirrorSerial = typeof authorizeSerial === 'function' ? authorizeSerial : () => true;
 
   wss = new WebSocketServer({ noServer: true });
 
@@ -378,6 +380,12 @@ function init({ httpServer, adbResolver, token, config } = {}) {
     const serial = url.searchParams.get('serial');
     if (!serial) {
       socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+      return socket.destroy();
+    }
+    let authorized = false;
+    try { authorized = authorizeMirrorSerial(serial) === true; } catch (_) {}
+    if (!authorized) {
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       return socket.destroy();
     }
     wss.handleUpgrade(req, socket, head, ws => onConnection(ws, serial));

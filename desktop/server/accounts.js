@@ -69,6 +69,7 @@ function publicView(a) {
     id: a.id, platform: a.platform, username: a.username, email: a.email,
     notes: a.notes, status: a.status, device_id: a.device_id, active: !!a.active,
     has_password: !!a.password_enc, has_totp: !!a.totp_enc,
+    has_secret_ref: !!a.secret_ref,
     cooldown_until: a.cooldown_until, last_used_at: a.last_used_at,
     created_at: a.created_at, updated_at: a.updated_at,
   };
@@ -84,15 +85,15 @@ function list({ platform, status, device_id } = {}) {
   return DB.all(sql, p).map(publicView);
 }
 function create(d) {
-  const r = DB.run('INSERT INTO accounts(platform,username,password_enc,email,totp_enc,notes,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
-    [d.platform || null, d.username || null, enc(d.password), d.email || null, enc(d.totp_secret), d.notes || null, d.status || 'unused', now(), now()]);
+  const r = DB.run('INSERT INTO accounts(platform,username,password_enc,email,totp_enc,secret_ref,notes,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+    [d.platform || null, d.username || null, enc(d.password), d.email || null, enc(d.totp_secret), d.secret_ref || null, d.notes || null, d.status || 'unused', now(), now()]);
   return publicView(DB.get('SELECT * FROM accounts WHERE id=?', [r.lastInsertRowid]));
 }
 function update(id, d) {
   const a = DB.get('SELECT * FROM accounts WHERE id=?', [id]);
   if (!a) return null;
-  DB.run('UPDATE accounts SET platform=COALESCE(?,platform), username=COALESCE(?,username), email=COALESCE(?,email), notes=COALESCE(?,notes), status=COALESCE(?,status), password_enc=?, totp_enc=?, updated_at=? WHERE id=?',
-    [d.platform ?? null, d.username ?? null, d.email ?? null, d.notes ?? null, d.status ?? null,
+  DB.run('UPDATE accounts SET platform=COALESCE(?,platform), username=COALESCE(?,username), email=COALESCE(?,email), secret_ref=COALESCE(?,secret_ref), notes=COALESCE(?,notes), status=COALESCE(?,status), password_enc=?, totp_enc=?, updated_at=? WHERE id=?',
+    [d.platform ?? null, d.username ?? null, d.email ?? null, d.secret_ref ?? null, d.notes ?? null, d.status ?? null,
      d.password !== undefined && d.password !== '' ? enc(d.password) : a.password_enc,
      d.totp_secret !== undefined && d.totp_secret !== '' ? enc(d.totp_secret) : a.totp_enc,
      now(), id]);

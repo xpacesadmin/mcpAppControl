@@ -23,9 +23,23 @@ function normalizeStabilizeParams(params = {}) {
     throw new Error('animation_scale solo admite 0, 0.5 o 1');
   }
 
-  const timezone = String(params.timezone ?? '').trim();
+  const syncTime = toBoolean(params.sync_time, true);
+  const clockSource = String(params.clock_source || 'host').trim().toLowerCase();
+  if (!['host', 'automatic'].includes(clockSource)) {
+    throw new Error('clock_source solo admite host o automatic');
+  }
+
+  const detectedTimezone = process.env.MCP_DEFAULT_TIMEZONE
+    || Intl.DateTimeFormat().resolvedOptions().timeZone
+    || 'UTC';
+  const timezone = String(params.timezone || (syncTime && clockSource === 'host' ? detectedTimezone : '')).trim();
   if (timezone && !TIMEZONE_PATTERN.test(timezone)) {
     throw new Error('Zona horaria inválida; usa un identificador como America/Chicago');
+  }
+
+  const maxClockDriftSeconds = Number(params.max_clock_drift_seconds ?? 10);
+  if (!Number.isInteger(maxClockDriftSeconds) || maxClockDriftSeconds < 1 || maxClockDriftSeconds > 60) {
+    throw new Error('max_clock_drift_seconds debe ser un entero entre 1 y 60');
   }
 
   return {
@@ -33,8 +47,10 @@ function normalizeStabilizeParams(params = {}) {
     screenTimeoutMinutes,
     screenTimeoutMs: screenTimeoutMinutes * 60 * 1000,
     animationScale,
-    syncTime: toBoolean(params.sync_time, false),
+    syncTime,
+    clockSource,
     timezone,
+    maxClockDriftSeconds,
   };
 }
 
@@ -64,10 +80,11 @@ async function readSetting(serial, shell, namespace, key) {
 }
 
 async function readDeviceState(serial, shell) {
-  const [proxy, timezone, date, route, stayAwake, screenTimeout, windowScale, transitionScale, animatorScale] = await Promise.all([
+  const [proxy, timezone, date, epochSeconds, route, stayAwake, screenTimeout, windowScale, transitionScale, animatorScale] = await Promise.all([
     readSetting(serial, shell, 'global', 'http_proxy'),
     shell(serial, ['getprop', 'persist.sys.timezone']).then(String).then(value => value.trim()).catch(() => null),
     shell(serial, ['date']).then(String).then(value => value.trim()).catch(() => null),
+    shell(serial, ['date', '+%s']).then(String).then(value => Number(value.trim())).catch(() => null),
     shell(serial, ['ip', 'route']).then(String).then(value => value.trim()).catch(() => null),
     readSetting(serial, shell, 'global', 'stay_on_while_plugged_in'),
     readSetting(serial, shell, 'system', 'screen_off_timeout'),
@@ -81,6 +98,7 @@ async function readDeviceState(serial, shell) {
     proxy: PROXY_DISABLED_VALUES.has(proxy ?? '') ? null : proxy,
     timezone,
     date,
+    epoch_seconds: Number.isFinite(epochSeconds) ? epochSeconds : null,
     route,
     local_ip: localIpMatch ? localIpMatch[1] : null,
     stay_on_while_plugged_in: stayAwake === null ? null : Number(stayAwake),
@@ -104,7 +122,11 @@ async function stabilizeDevice(serial, params, shell) {
     { key: 'animator_animation', args: ['settings', 'put', 'global', 'animator_duration_scale', String(options.animationScale)] },
   ];
 
-  if (options.syncTime) {
+  const hostEpochMs = Date.now();
+  if (options.syncTime && options.clockSource === 'host') {
+    operations.push({ key: 'automatic_time', args: ['settings', 'put', 'global', 'auto_time', '0'] });
+    operations.push({ key: 'automatic_timezone', args: ['settings', 'put', 'global', 'auto_time_zone', '0'] });
+  } else if (options.syncTime) {
     operations.push({ key: 'automatic_time', args: ['settings', 'put', 'global', 'auto_time', '1'] });
     operations.push({
       key: 'automatic_timezone',
@@ -114,6 +136,9 @@ async function stabilizeDevice(serial, params, shell) {
   if (options.timezone) {
     operations.push({ key: 'timezone', args: ['cmd', 'alarm', 'set-timezone', options.timezone] });
   }
+  if (options.syncTime && options.clockSource === 'host') {
+    operations.push({ key: 'host_clock', args: ['cmd', 'alarm', 'set-time', String(hostEpochMs)] });
+  }
 
   const operationsResult = [];
   for (const operation of operations) {
@@ -121,11 +146,14 @@ async function stabilizeDevice(serial, params, shell) {
   }
 
   const state = await readDeviceState(serial, shell);
+  const observedAtSeconds = Math.floor(Date.now() / 1000);
+  const clockDriftSeconds = state.epoch_seconds === null ? null : Math.abs(observedAtSeconds - state.epoch_seconds);
   const checks = {
     keep_awake: state.stay_on_while_plugged_in === (options.keepAwake ? 3 : 0),
     screen_timeout: state.screen_off_timeout_ms === options.screenTimeoutMs,
     animations: Object.values(state.animation_scale).every(value => value === options.animationScale),
     timezone: !options.timezone || state.timezone === options.timezone,
+    clock: !options.syncTime || (clockDriftSeconds !== null && clockDriftSeconds <= options.maxClockDriftSeconds),
   };
   const failedOperations = operationsResult.filter(result => !result.success);
   const failedChecks = Object.entries(checks).filter(([, valid]) => !valid).map(([key]) => key);
@@ -134,9 +162,16 @@ async function stabilizeDevice(serial, params, shell) {
   return {
     success,
     message: success
-      ? `Dispositivo estabilizado: pantalla ${options.screenTimeoutMinutes} min, animaciones ${options.animationScale}`
-      : `Estabilización incompleta: ${failedOperations.length} comandos fallaron; verificaciones: ${failedChecks.join(', ') || 'sin fallos'}`,
-    data: { requested: options, state, checks, operations: operationsResult },
+      ? 'Dispositivo estabilizado y reloj verificado (' + options.clockSource + ', deriva ' + clockDriftSeconds + 's)'
+      : 'Estabilización incompleta: ' + failedOperations.length + ' comandos fallaron; verificaciones: ' + (failedChecks.join(', ') || 'sin fallos'),
+    data: {
+      requested: options,
+      host: { epoch_ms: hostEpochMs, timezone: options.timezone },
+      state,
+      clock_drift_seconds: clockDriftSeconds,
+      checks,
+      operations: operationsResult,
+    },
   };
 }
 
@@ -182,7 +217,7 @@ async function clearProxy(serial, shell) {
   const success = failedOperations.length === 0 && PROXY_DISABLED_VALUES.has(actual ?? '');
   return {
     success,
-    message: success ? 'Proxy eliminado y tráfico directo verificado' : 'El proxy no pudo eliminarse completamente',
+    message: success ? 'Proxy global eliminado; el acceso WAN no se verifica en esta operación' : 'El proxy no pudo eliminarse completamente',
     data: { proxy: PROXY_DISABLED_VALUES.has(actual ?? '') ? null : actual, actual, operations: operationsResult },
   };
 }

@@ -16,7 +16,14 @@ let settings = null; try { settings = require('../server/settings'); } catch (_)
 const HJ = (x, y) => settings ? settings.jitterXY(x, y) : { x, y };
 const HD = (ms) => settings ? settings.varyDuration(ms) : ms;
 
-let CONFIG = { backendUrl: 'http://127.0.0.1:8733/api/v1', backendToken: '', adbPath: null, db: null, wsPort: 6011, autoInstallAgent: true };
+let CONFIG = {
+  backendUrl: 'http://127.0.0.1:8733/api/v1', backendToken: '', adbPath: null,
+  db: null, wsPort: 6011, autoInstallAgent: true,
+  allowedSerials: [],
+  requireAllowlist: false,
+  suppressStartupWrites: false,
+  allowNetworkScan: false,
+};
 
 // Mapeo de plataforma a package name para LOGIN_GENERIC, BAN_RECOVERY, etc.
 const PLATFORM_PACKAGES = {
@@ -34,6 +41,12 @@ let needsInitialReconciliation = true;
 // Ruta a un recurso empaquetado (resources/<...>) o su equivalente en desarrollo.
 function app_ruta_recurso(...partes) {
   return process.resourcesPath ? path.join(process.resourcesPath, ...partes) : null;
+}
+
+function isAllowedSerial(serial) {
+  const allowlist = Array.isArray(CONFIG.allowedSerials) ? CONFIG.allowedSerials : [];
+  if (!CONFIG.requireAllowlist && allowlist.length === 0) return true;
+  return allowlist.includes(String(serial || '').trim());
 }
 
 // ---------- localizar adb.exe ----------
@@ -129,11 +142,13 @@ async function listDevices() {
     .map(l => l.trim()).filter(Boolean)
     .map(l => l.split(/\s+/))
     .filter(p => p[1] === 'device')      // ignora unauthorized/offline
-    .map(p => p[0]);
+    .map(p => p[0])
+    .filter(isAllowedSerial);
 }
 
 async function registerDevice(serial) {
   let model = 'USB device', release = 'unknown';
+  if (!isAllowedSerial(serial)) return;
   try { model = (await shell(serial, ['getprop', 'ro.product.model'])).trim() || model; } catch (_) {}
   try { release = (await shell(serial, ['getprop', 'ro.build.version.release'])).trim() || release; } catch (_) {}
   live.set(serial, { serial, model, release, size: null });
@@ -145,9 +160,13 @@ async function registerDevice(serial) {
   try { const router = require('../router'); router.broadcast('device_connected', { serial_number: serial, name: model }); } catch (_) {}
   abrirTunelDelRouter(serial);
   asegurarAgente(serial);
-  reapplyProxy(serial);
-  applyStability(serial);   // estabilidad inmediata al conectar
-  applyTimeConfig(serial);  // hora/fecha estable al conectar
+  if (CONFIG.suppressStartupWrites) {
+    console.log(`[adb] lab: registro sin proxy/estabilización automática para ${serial}`);
+  } else {
+    reapplyProxy(serial);
+    applyStability(serial);   // estabilidad inmediata al conectar
+    applyTimeConfig(serial);  // hora/fecha estable al conectar
+  }
   if (serial.includes(':') && !knownTcp.has(serial)) knownTcp.set(serial, 0); // vigilar para reconexión
 }
 
@@ -262,7 +281,7 @@ async function poll() {
     if (Array.isArray(persisted)) {
       for (const device of persisted) {
         const addr = device.adb_serial || device.serial_number;
-        if (device.transport === 'adb' && !serials.includes(addr)) {
+        if (device.transport === 'adb' && isAllowedSerial(addr) && !serials.includes(addr)) {
           await backendPost('/devices/heartbeat', {
             serial_number: device.serial_number,
             status: 'offline',
@@ -272,7 +291,7 @@ async function poll() {
         // WiFi caídos no se reintentarían nunca más. La tabla `devices` ya guarda
         // la dirección (el serial de un dispositivo TCP es "ip:puerto"), así que
         // la usamos como origen de verdad para repoblar la lista de vigilancia.
-        if (String(addr || '').includes(':')) knownTcp.set(addr, 0);
+        if (isAllowedSerial(addr) && String(addr || '').includes(':')) knownTcp.set(addr, 0);
       }
       if (knownTcp.size) console.log(`[adb] ${knownTcp.size} direcciones WiFi recuperadas de la BD para reconexión automática`);
       needsInitialReconciliation = false;
@@ -460,6 +479,9 @@ async function tapId(serial, id) {
 const SCRIPT_CTX = { shell, adb, sleep, dumpUi, live, HJ, HD, CONFIG, execute };
 
 async function execute(serial, command, params) {
+  if (!isAllowedSerial(serial)) {
+    return { success: false, message: `ADB serial fuera del alcance aprobado: ${serial}` };
+  }
   const p = params || {};
 
   // Compatibilidad con el nombre anterior de la suite de TikTok. La migración de
@@ -628,6 +650,37 @@ async function execute(serial, command, params) {
         return maintenance.setProxy(serial, p, shell);
       }
 
+      case 'TEST_HTTP_PROXY': {
+        const proxy = maintenance.normalizeProxyParams(p);
+        const timeoutMs = Math.min(Math.max(Number(p.timeout_ms) || 10000, 1000), 30000);
+        const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+        const started = Date.now();
+        let observed;
+        try {
+          observed = String(await shell(serial, [
+            'curl', '-fsS', '--connect-timeout', String(Math.min(timeoutSeconds, 10)),
+            '--max-time', String(timeoutSeconds), '--proxy', `http://${proxy.value}`,
+            'https://api.ipify.org',
+          ], { timeout: timeoutMs + 3000 })).trim();
+        } catch (error) {
+          return { success: false, message: `No se pudo probar ${proxy.value}: ${error.message}` };
+        }
+        const validIp = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(observed);
+        const expected = String(p.expected_public_ip || '').trim() || null;
+        const matches = validIp && (!expected || observed === expected);
+        return {
+          success: matches,
+          message: matches ? `Ruta ${proxy.value} verificada` : `IP inesperada a través de ${proxy.value}`,
+          data: {
+            proxy: proxy.value,
+            external_ip: validIp ? observed : null,
+            expected_public_ip: expected,
+            matches,
+            latency_ms: Date.now() - started,
+          },
+        };
+      }
+
       case 'CLEAR_PROXY':
         return maintenance.clearProxy(serial, shell);
 
@@ -637,6 +690,41 @@ async function execute(serial, command, params) {
 
       case 'DEVICE_STABILIZE':
         return maintenance.stabilizeDevice(serial, p, shell);
+
+      // ---- Cuentas Google: solo UI nativa y conteo sanitizado ----
+      case 'GET_GOOGLE_ACCOUNTS': {
+        const dump = await shell(serial, ['dumpsys', 'account']);
+        const matches = String(dump).match(/Account\s*\{[^}]*type=com\.google[^}]*\}/g) || [];
+        return {
+          success: true,
+          message: `${matches.length} cuenta(s) Google detectada(s)`,
+          data: { account_count: matches.length, identifiers_exposed: false },
+        };
+      }
+
+      case 'OPEN_GOOGLE_ACCOUNT_ENROLLMENT': {
+        await shell(serial, [
+          'am', 'start', '-a', 'android.settings.ADD_ACCOUNT_SETTINGS',
+          '--esa', 'account_types', 'com.google',
+        ]);
+        return {
+          success: true,
+          message: 'Pantalla nativa para agregar una cuenta Google abierta',
+          data: { provider: 'google', credentials_captured: false },
+        };
+      }
+
+      case 'OPEN_GOOGLE_ACCOUNT_SETTINGS': {
+        await shell(serial, [
+          'am', 'start', '-a', 'android.settings.SYNC_SETTINGS',
+          '--esa', 'account_types', 'com.google',
+        ]);
+        return {
+          success: true,
+          message: 'Pantalla nativa de cuentas Google abierta',
+          data: { provider: 'google', credentials_captured: false },
+        };
+      }
 
       case 'DEVICE_HEALTH': {
         // Batería, temperatura, carga y almacenamiento libre.
@@ -675,18 +763,22 @@ async function execute(serial, command, params) {
       case 'CHECK_IP': {
         // Intenta la IP externa desde el propio dispositivo (a través de su proxy si lo tiene).
         let ip = '', method = '';
-        try { ip = (await shell(serial, ['curl', '-s', '--max-time', '8', 'https://api.ipify.org'], { timeout: 12000 })).trim(); method = 'curl'; } catch (_) {}
-        if (!/^\d+\.\d+\.\d+\.\d+$/.test(ip)) {
+        const proxy = (await shell(serial, ['settings', 'get', 'global', 'http_proxy']).catch(() => '')).trim();
+        const proxyActive = !!(proxy && proxy !== ':0' && proxy !== 'null');
+        const curlArgs = ['curl', '-s', '--max-time', '8'];
+        if (proxyActive) curlArgs.push('--proxy', `http://${proxy}`);
+        curlArgs.push('https://api.ipify.org');
+        try { ip = (await shell(serial, curlArgs, { timeout: 12000 })).trim(); method = proxyActive ? 'curl+global-proxy' : 'curl'; } catch (_) {}
+        if (!proxyActive && !/^\d+\.\d+\.\d+\.\d+$/.test(ip)) {
           try { ip = (await shell(serial, ['toybox', 'wget', '-qO-', 'http://api.ipify.org'], { timeout: 12000 })).trim(); method = 'toybox'; } catch (_) {}
         }
-        const proxy = (await shell(serial, ['settings', 'get', 'global', 'http_proxy']).catch(() => '')).trim();
         let localIp = '';
         try { const m = (await shell(serial, ['ip', 'route'])).match(/src (\d+\.\d+\.\d+\.\d+)/); localIp = m ? m[1] : ''; } catch (_) {}
         const ok = /^\d+\.\d+\.\d+\.\d+$/.test(ip);
         return {
-          success: true,
+          success: ok,
           message: ok ? `IP externa: ${ip}` : (localIp ? `IP local: ${localIp} (externa no disponible; falta curl/wget)` : 'No se pudo obtener IP'),
-          data: { external_ip: ok ? ip : null, local_ip: localIp || null, proxy: (proxy && proxy !== ':0' && proxy !== 'null') ? proxy : null, method },
+          data: { external_ip: ok ? ip : null, local_ip: localIp || null, proxy: proxyActive ? proxy : null, method },
         };
       }
 
@@ -1528,6 +1620,9 @@ async function connectTcp(address) {
   let target = String(address || '').trim();
   if (!target) return { success: false, message: 'Dirección TCP requerida' };
   if (!target.includes(':')) target += ':5555';
+  if (!isAllowedSerial(target)) {
+    return { success: false, message: `ADB serial fuera del alcance aprobado: ${target}` };
+  }
   const result = await _adbConnect(target);
   poll();
   return result;
@@ -1577,6 +1672,9 @@ async function mapLimit(items, limit, worker) {
 // Escanea `prefix`.from … `prefix`.to en el puerto dado y conecta lo que responda.
 // Devuelve una fila por IP viva: { ip, address, ok, message }.
 async function scanRange({ prefix, from = 0, to = 254, port = 5555, probeTimeout = 400 } = {}) {
+  if (!CONFIG.allowNetworkScan) {
+    return { success: false, message: 'El escaneo de red está desactivado; registra seriales ADB aprobados de forma explícita' };
+  }
   const base = String(prefix || '').trim().replace(/\.+$/, '');
   if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(base) || base.split('.').some(o => Number(o) > 255)) {
     return { success: false, message: 'Prefijo IP inválido; se espera "a.b.c" (ej. 192.168.60)' };
@@ -1620,8 +1718,10 @@ function has(serial) { return live.has(serial); }
 
 function start(config) {
   CONFIG = Object.assign(CONFIG, config);
+  CONFIG.allowedSerials = [...new Set((CONFIG.allowedSerials || []).map(value => String(value).trim()).filter(Boolean))];
   needsInitialReconciliation = true;
   console.log(`[adb] usando adb: ${resolveAdb()}`);
+  console.log(`[adb] alcance: ${CONFIG.requireAllowlist ? CONFIG.allowedSerials.join(', ') || 'ningun dispositivo' : 'dispositivos ADB conectados'}`);
   agent.init({ adbResolver: resolveAdb });
   agent.configurarApk({ wsPort: CONFIG.wsPort });   // el agente recién instalado apunta al router por el túnel
   poll();

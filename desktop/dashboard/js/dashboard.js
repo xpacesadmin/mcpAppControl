@@ -683,6 +683,15 @@ async function quickAction(command, params = {}) {
         ids = devices.filter(d => ['online', 'busy'].includes(d.status)).map(d => d.id);
     }
     if (!ids.length) { alert('No hay dispositivos online seleccionados'); return; }
+    const confirmationRequired = new Set([
+        'CLEAR_APP', 'UNINSTALL_APP', 'INSTALL_APK', 'SETTINGS_PUT',
+        'REBOOT', 'MONKEY', 'PUSH_FILE',
+    ]);
+    if (confirmationRequired.has(command) && params.confirm !== true) {
+        const target = ids.length === 1 ? 'el dispositivo seleccionado' : `${ids.length} dispositivos`;
+        if (!confirm(`${command} puede modificar datos o reiniciar ${target}. ¿Continuar?`)) return;
+        params = { ...params, confirm: true };
+    }
 
     addLog(`Ejecutando "${command}" en ${ids.length} dispositivos…`, 'info');
     try {

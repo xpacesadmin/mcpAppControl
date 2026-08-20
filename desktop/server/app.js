@@ -8,7 +8,10 @@ const adb = require('../adb');
 const alerts = require('./alerts');
 const monitor = require('./monitor');
 const accounts = require('./accounts');
+const deviceAccounts = require('./device_accounts');
 const proxies = require('./proxies');
+const labControl = require('./lab_control');
+const proxyRoutes = require('./proxy_routes');
 const hermes = require('./hermes');
 const settings = require('./settings');
 const views = require('./views');
@@ -36,8 +39,43 @@ function paginate(items, requestedPage = 1, requestedPageSize = 50) {
     total,
   };
 }
+function publicDevice(device) {
+  if (!device) return device;
+  const { proxy_user, proxy_pass, ...safe } = device;
+  return {
+    ...safe,
+    proxy_credentials_configured: !!(proxy_user || proxy_pass),
+  };
+}
+
 
 function createServer(db, routerPort, apiToken = '') {
+  labControl.init(db);
+  proxyRoutes.init(db, {
+    verifyDeviceEgress: device => logic.routerDispatch(device.serial_number, 'CHECK_IP', {}),
+    getDeviceProxy: device => logic.routerDispatch(device.serial_number, 'GET_PROXY', {}),
+    applyDeviceProxy: (device, route) => logic.routerDispatch(device.serial_number, 'SET_PROXY', {
+      host: route.internal_host,
+      port: route.internal_port,
+    }),
+    restoreDeviceProxy: (device, previousState) => {
+      if (previousState && previousState.proxy_enabled && previousState.proxy_host && previousState.proxy_port) {
+        return logic.routerDispatch(device.serial_number, 'SET_PROXY', {
+          host: previousState.proxy_host,
+          port: previousState.proxy_port,
+        });
+      }
+      return logic.routerDispatch(device.serial_number, 'CLEAR_PROXY', {});
+    },
+    probeDeviceRoute: (device, route, timeoutMs) => logic.routerDispatch(device.serial_number, 'TEST_HTTP_PROXY', {
+      host: route.internal_host,
+      port: route.internal_port,
+      expected_public_ip: route.expected_public_ip,
+      timeout_ms: timeoutMs,
+    }),
+  });
+  deviceAccounts.init(db, { dispatchDevice: (serial, command, params) => logic.routerDispatch(serial, command, params) });
+
   const app = express();
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -66,8 +104,30 @@ function createServer(db, routerPort, apiToken = '') {
     }
     return next();
   };
-
   app.use(tokenMiddleware);
+  app.use((req, res, next) => {
+    const control = labControl.state();
+    if (!control.lab_mode_enabled) return next();
+    const write = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
+    const legacyProxyWrite = (
+      req.path === '/api/v1/proxies' ||
+      req.path.startsWith('/api/v1/proxies/') ||
+      /^\/api\/v1\/devices\/[^/]+\/proxy(?:\/|$)/.test(req.path)
+    );
+    const legacyAccountAccess = req.path.startsWith('/api/v1/accounts') &&
+      (write || req.path.endsWith('/totp'));
+    const blocked = legacyProxyWrite ||
+      legacyAccountAccess ||
+      (write && req.path.startsWith('/api/v1/schedules')) ||
+      (write && req.path === '/api/v1/devices/connect-tcp') ||
+      (write && /^\/api\/v1\/devices\/[^/]+\/rotate-account$/.test(req.path)) ;
+    if (blocked) {
+      return res.status(423).json({ success: false, message: 'Legacy mutation disabled while lab mode is enabled' });
+    }
+    return next();
+  });
+
+
 
   app.get('/up', (req, res) => {
     res.json({
@@ -78,7 +138,242 @@ function createServer(db, routerPort, apiToken = '') {
     });
   });
 
+  app.get('/api/v1/lab/status', (req, res) => {
+    res.json({ success: true, data: labControl.state() });
+  });
+  app.put('/api/v1/lab/config', (req, res) => {
+    try { res.json({ success: true, data: labControl.configure(req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.post('/api/v1/lab/emergency-stop', (req, res) => {
+    try { res.json({ success: true, data: labControl.emergencyStop(req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.post('/api/v1/lab/resume', (req, res) => {
+    try { res.json({ success: true, data: labControl.resume(req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.get('/api/v1/lab/audit', (req, res) => {
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+    const rows = db.all('SELECT * FROM audit_events ORDER BY id DESC LIMIT ?', [limit]).map(row => ({
+      ...row,
+      details: logic.safeJson(row.details, {}),
+    }));
+    res.json({ success: true, data: rows });
+  });
+
+  app.get('/api/v1/proxy-routes', (req, res) => {
+    res.json({ success: true, data: proxyRoutes.list(req.query || {}) });
+  });
+  app.get('/api/v1/proxy-routes/:routeId', (req, res) => {
+    const route = proxyRoutes.inspect(req.params.routeId);
+    if (!route) return res.status(404).json({ success: false, message: 'Route not found' });
+    res.json({ success: true, data: route });
+  });
+  app.post('/api/v1/proxy-routes', (req, res) => {
+    try { res.status(201).json({ success: true, data: proxyRoutes.enroll(req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.post('/api/v1/proxy-routes/:routeId/test', async (req, res) => {
+    try { res.json({ success: true, data: await proxyRoutes.testRoute(req.params.routeId, req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.post('/api/v1/proxy-routes/:routeId/assign', async (req, res) => {
+    try {
+      res.json({ success: true, data: await proxyRoutes.assign(req.params.routeId, req.body || {}) });
+    } catch (error) {
+      res.status(422).json({ success: false, message: error.message });
+    }
+  });
+  app.post('/api/v1/devices/:id/proxy-route/rotate', async (req, res) => {
+    try {
+      const body = req.body || {};
+      const result = await proxyRoutes.rotate({ ...body, device_id: Number(req.params.id) });
+      res.json({ success: true, data: result });
+    } catch (error) {
+      res.status(422).json({ success: false, message: error.message });
+    }
+  });
+  app.post('/api/v1/proxy-routes/:routeId/release', async (req, res) => {
+    try {
+      res.json({ success: true, data: await proxyRoutes.release(req.params.routeId, req.body || {}) });
+    } catch (error) {
+      res.status(422).json({ success: false, message: error.message });
+    }
+  });
+  app.post('/api/v1/proxy-routes/:routeId/verify-device-egress', async (req, res) => {
+    try {
+      const result = await proxyRoutes.verifyDeviceEgress(req.params.routeId, req.body || {});
+      res.status(result.matches ? 200 : 409).json({ success: result.matches, data: result });
+    } catch (error) {
+      res.status(422).json({ success: false, message: error.message });
+    }
+  });
+  app.post('/api/v1/devices/:id/proxy-control/direct', async (req, res) => {
+    try {
+      const body = req.body || {};
+      const deviceId = Number(req.params.id);
+      labControl.assertDeviceAllowed(deviceId);
+      if (body.confirm !== true) throw new Error('confirm=true requerido');
+      if (body.idempotency_key) {
+        const prior = db.get('SELECT * FROM audit_events WHERE idempotency_key=?', [body.idempotency_key]);
+        if (prior) return res.json({ success: true, data: { direct: true, idempotent_replay: true } });
+      }
+      const active = db.get('SELECT * FROM proxy_route_assignments WHERE device_id=? AND active=1', [deviceId]);
+      if (active) {
+        const released = await proxyRoutes.release(active.route_id, {
+          ...body, device_id: deviceId, restore_mode: 'direct',
+        });
+        return res.json({ success: true, data: { direct: true, released_route_id: active.route_id, ...released } });
+      }
+      const device = db.get('SELECT * FROM devices WHERE id=?', [deviceId]);
+      if (!device) throw new Error('Dispositivo no encontrado');
+      const cleared = await logic.routerDispatch(device.serial_number, 'CLEAR_PROXY', {});
+      if (!cleared || !cleared.success) throw new Error((cleared && cleared.message) || 'No se pudo limpiar el proxy Android');
+      db.run('UPDATE devices SET proxy_enabled=0,proxy_host=NULL,proxy_port=NULL,updated_at=? WHERE id=?', [now(), deviceId]);
+      labControl.audit('device_proxy.direct', 'ok', {
+        active_route_released: false, android_proxy: null,
+      }, { ...body, device_id: deviceId });
+      return res.json({ success: true, data: { direct: true, released_route_id: null, clear_result: cleared } });
+    } catch (error) {
+      return res.status(422).json({ success: false, message: error.message });
+    }
+  });
+
+  app.get('/api/v1/account-profiles', (req, res) => {
+    const { platform, status, device_id } = req.query;
+    res.json({ success: true, data: accounts.list({ platform, status, device_id: device_id != null ? Number(device_id) : undefined }) });
+  });
+  app.get('/api/v1/account-profiles/:id', (req, res) => {
+    const row = db.get('SELECT * FROM accounts WHERE id=?', [Number(req.params.id)]);
+    if (!row) return res.status(404).json({ success: false, message: 'Account profile not found' });
+    res.json({ success: true, data: accounts.publicView(row) });
+  });
+  app.post('/api/v1/account-profiles/enroll', (req, res) => {
+    try {
+      const body = req.body || {};
+      labControl.assertOperational();
+      if (body.confirm !== true) throw new Error('confirm=true required');
+      for (const key of ['password', 'password_enc', 'totp', 'totp_secret', 'token', 'credentials']) {
+        if (body[key] != null && body[key] !== '') throw new Error(`Secret field prohibited: ${key}`);
+      }
+      if (!body.username && !body.email) throw new Error('username or email required');
+      if (!body.secret_ref || !/^[A-Za-z0-9._:/-]{3,200}$/.test(String(body.secret_ref))) {
+        throw new Error('A restricted local secret_ref is required');
+      }
+      if (body.idempotency_key) {
+        const prior = db.get('SELECT * FROM audit_events WHERE idempotency_key=?', [body.idempotency_key]);
+        if (prior) {
+          const details = logic.safeJson(prior.details, {});
+          const existing = db.get('SELECT * FROM accounts WHERE id=?', [details.account_id]);
+          return res.json({ success: true, data: accounts.publicView(existing), idempotent_replay: true });
+        }
+      }
+      const profile = accounts.create({
+        platform: body.platform,
+        username: body.username,
+        email: body.email,
+        secret_ref: body.secret_ref,
+        notes: body.notes,
+        status: 'unused',
+      });
+      labControl.audit('account_profile.enroll', 'ok', { account_id: profile.id, platform: profile.platform }, body);
+      res.status(201).json({ success: true, data: profile });
+    } catch (error) {
+      res.status(422).json({ success: false, message: error.message });
+    }
+  });
+  app.post('/api/v1/account-profiles/:id/assign', (req, res) => {
+    try {
+      const body = req.body || {};
+      if (body.confirm !== true) throw new Error('confirm=true required');
+      if (body.idempotency_key) {
+        const prior = db.get('SELECT id FROM audit_events WHERE idempotency_key=?', [body.idempotency_key]);
+        if (prior) {
+          const existing = db.get('SELECT * FROM accounts WHERE id=?', [Number(req.params.id)]);
+          return res.json({ success: true, data: accounts.publicView(existing), idempotent_replay: true });
+        }
+      }
+      if (!Object.prototype.hasOwnProperty.call(body, 'expected_previous_account_id')) {
+        throw new Error('expected_previous_account_id required; use null when none');
+      }
+      const id = Number(req.params.id);
+      const deviceId = Number(body.device_id);
+      labControl.assertDeviceAllowed(deviceId);
+      const account = db.get('SELECT * FROM accounts WHERE id=?', [id]);
+      if (!account) throw new Error('Account profile not found');
+      const current = accounts.activeFor(deviceId, account.platform);
+      const actual = current ? Number(current.id) : null;
+      const expected = body.expected_previous_account_id == null ? null : Number(body.expected_previous_account_id);
+      if (actual !== expected) throw new Error(`Previous account changed: expected=${expected}, actual=${actual}`);
+      const assigned = accounts.assign(id, deviceId);
+      labControl.audit('account_profile.assign', 'ok', { account_id: id, previous_account_id: actual }, { ...body, device_id: deviceId });
+      res.json({ success: true, data: assigned });
+    } catch (error) {
+      res.status(422).json({ success: false, message: error.message });
+    }
+  });
+  app.post('/api/v1/account-profiles/:id/release', (req, res) => {
+    try {
+      const body = req.body || {};
+      if (body.confirm !== true) throw new Error('confirm=true required');
+      if (body.idempotency_key) {
+        const prior = db.get('SELECT id FROM audit_events WHERE idempotency_key=?', [body.idempotency_key]);
+        if (prior) {
+          const existing = db.get('SELECT * FROM accounts WHERE id=?', [Number(req.params.id)]);
+          return res.json({ success: true, data: accounts.publicView(existing), idempotent_replay: true });
+        }
+      }
+      const id = Number(req.params.id);
+      const deviceId = Number(body.device_id);
+      labControl.assertDeviceInScope(deviceId);
+      const account = db.get('SELECT * FROM accounts WHERE id=?', [id]);
+      if (!account || Number(account.device_id) !== deviceId || !account.active) throw new Error('Account is not the active assignment');
+      const released = accounts.unassign(id);
+      labControl.audit('account_profile.release', 'ok', { account_id: id }, { ...body, device_id: deviceId });
+      res.json({ success: true, data: released });
+    } catch (error) {
+      res.status(422).json({ success: false, message: error.message });
+    }
+  });
+
   // Servir Dashboard estático
+  app.get('/api/v1/devices/:id/google-accounts', async (req, res) => {
+    try {
+      res.json({ success: true, data: await deviceAccounts.inspect(Number(req.params.id)) });
+    } catch (error) {
+      res.status(422).json({ success: false, message: error.message });
+    }
+  });
+  app.post('/api/v1/devices/:id/google-accounts/enrollment/start', async (req, res) => {
+    try {
+      res.json({ success: true, data: await deviceAccounts.startEnrollment(Number(req.params.id), req.body || {}) });
+    } catch (error) {
+      res.status(422).json({ success: false, message: error.message });
+    }
+  });
+  app.post('/api/v1/devices/:id/google-accounts/enrollment/verify', async (req, res) => {
+    try {
+      res.json({ success: true, data: await deviceAccounts.verifyEnrollment(Number(req.params.id), req.body || {}) });
+    } catch (error) {
+      res.status(422).json({ success: false, message: error.message });
+    }
+  });
+  app.put('/api/v1/devices/:id/google-accounts/rotation', (req, res) => {
+    try {
+      res.json({ success: true, data: deviceAccounts.setRotationAllowed(Number(req.params.id), req.body || {}) });
+    } catch (error) {
+      res.status(422).json({ success: false, message: error.message });
+    }
+  });
+  app.post('/api/v1/devices/:id/google-accounts/rotation/open', async (req, res) => {
+    try {
+      res.json({ success: true, data: await deviceAccounts.openRotation(Number(req.params.id), req.body || {}) });
+    } catch (error) {
+      res.status(422).json({ success: false, message: error.message });
+    }
+  });
+
   const dashboardPath = path.join(__dirname, '..', 'dashboard');
   app.use('/', express.static(dashboardPath));
   app.use('/dashboard', express.static(dashboardPath));
@@ -144,7 +439,7 @@ function createServer(db, routerPort, apiToken = '') {
     if (req.query.status) { sql += ` AND d.status = ?`; params.push(req.query.status); }
     if (req.query.search) { sql += ` AND (d.name LIKE ? OR d.serial_number LIKE ?)`; params.push(`%${req.query.search}%`, `%${req.query.search}%`); }
     sql += ` ORDER BY CASE d.status WHEN 'online' THEN 0 WHEN 'busy' THEN 1 WHEN 'error' THEN 2 ELSE 3 END, d.id ASC`;
-    const list = db.all(sql, params);
+    const list = db.all(sql, params).map(publicDevice);
     res.json({ success: true, data: paginate(list, req.query.page, req.query.per_page) });
   });
 
@@ -176,7 +471,7 @@ function createServer(db, routerPort, apiToken = '') {
     }
     const dev = db.get(`SELECT * FROM devices WHERE serial_number = ?`, [serial_number]);
     pushDevicesChanged();
-    res.status(201).json({ success: true, data: dev, message: 'Device registered successfully' });
+    res.status(201).json({ success: true, data: publicDevice(dev), message: 'Device registered successfully' });
   });
 
   app.post('/api/v1/devices/heartbeat', (req, res) => {
@@ -201,6 +496,17 @@ function createServer(db, routerPort, apiToken = '') {
       return res.status(422).json({ success: false, message: 'command tiene un formato inválido' });
     }
     const step = { type: command, ...(params || {}) };
+    try {
+      const control = labControl.state();
+      if (control.lab_mode_enabled) {
+        if (device_ids.length !== 1) throw new Error('Lab commands require exactly one device');
+        labControl.assertDeviceAllowed(Number(device_ids[0]));
+        const validation = labControl.validateStep(step);
+        if (validation.length) throw new Error(validation.join('; '));
+      }
+    } catch (error) {
+      return res.status(422).json({ success: false, message: error.message });
+    }
     const placeholders = device_ids.map(() => '?').join(',');
     const devices = db.all(`SELECT * FROM devices WHERE id IN (${placeholders})`, device_ids);
     const results = [];
@@ -208,8 +514,8 @@ function createServer(db, routerPort, apiToken = '') {
     for (const d of devices) {
       const r = await logic.executeStep(d, step);
       db.run(`INSERT INTO execution_logs(device_serial, command_type, success, message, result_data, timestamp, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`,
-        [d.serial_number, command, r.success ? 1 : 0, r.message, JSON.stringify(r.data || {}), now(), now(), now()]);
-      results.push({ device_id: d.id, device: d.serial_number, success: !!r.success, message: r.message, data: r.data || null });
+        [d.serial_number, command, r.success ? 1 : 0, labControl.sanitize(r.message), JSON.stringify(labControl.sanitize(r.data || {})), now(), now(), now()]);
+      results.push({ device_id: d.id, device: d.serial_number, success: !!r.success, message: labControl.sanitize(r.message), data: labControl.sanitize(r.data || null) });
     }
     const ok = results.filter(x => x.success).length;
     const failed = results.length - ok;
@@ -226,7 +532,7 @@ function createServer(db, routerPort, apiToken = '') {
     const { serial } = req.params;
     const { command_type, success, message, result_data, task_id } = req.body;
     db.run(`INSERT INTO execution_logs(task_id, device_serial, command_type, success, message, result_data, timestamp, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)`,
-      [task_id || null, serial, command_type, success ? 1 : 0, message || null, JSON.stringify(result_data || {}), now(), now(), now()]);
+      [task_id || null, serial, command_type, success ? 1 : 0, labControl.sanitize(message || null), JSON.stringify(labControl.sanitize(result_data || {})), now(), now(), now()]);
     res.json({ success: true });
   });
 
@@ -236,6 +542,10 @@ function createServer(db, routerPort, apiToken = '') {
   const shotsDir = path.join(path.dirname(db.file && db.file !== ':memory:' ? db.file : __dirname), 'screenshots');
   app.post('/api/v1/devices/:serial/screenshot', (req, res) => {
     const { serial } = req.params;
+    const dev = db.get('SELECT * FROM devices WHERE adb_serial=? OR serial_number=?', [serial, serial]);
+    if (!dev) return res.status(404).json({ success: false, message: 'Device not found' });
+    try { labControl.assertDeviceInScope(dev.id); }
+    catch (error) { return res.status(403).json({ success: false, message: error.message }); }
     const { image_data } = req.body;
     let stored = image_data;
     try {
@@ -256,13 +566,15 @@ function createServer(db, routerPort, apiToken = '') {
     const { serial } = req.params;
     const { message, success, task_id } = req.body;
     db.run(`INSERT INTO execution_logs(task_id, device_serial, command_type, success, message, timestamp, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`,
-      [task_id || null, serial, 'AGENT_LOG', success !== false ? 1 : 0, message, now(), now(), now()]);
+      [task_id || null, serial, 'AGENT_LOG', success !== false ? 1 : 0, labControl.sanitize(message), now(), now(), now()]);
     res.json({ success: true });
   });
 
   app.post('/api/v1/devices/:id/screen-frame', async (req, res) => {
     const dev = db.get(`SELECT * FROM devices WHERE id = ? OR serial_number = ?`, [req.params.id, req.params.id]);
     if (!dev) return res.status(404).json({ success: false, message: 'Device not found' });
+    try { labControl.assertDeviceInScope(dev.id); }
+    catch (error) { return res.status(403).json({ success: false, message: error.message }); }
     if (dev.status !== 'online' && dev.status !== 'busy') {
       return res.status(409).json({ success: false, message: 'El dispositivo no está conectado.' });
     }
@@ -297,7 +609,7 @@ function createServer(db, routerPort, apiToken = '') {
     const dev = db.get(`SELECT d.*, g.name as group_name FROM devices d LEFT JOIN device_groups g ON d.assigned_group_id = g.id WHERE d.id = ? OR d.serial_number = ?`, [req.params.id, req.params.id]);
     if (!dev) return res.status(404).json({ success: false, message: 'Device not found' });
     const logs = db.all(`SELECT * FROM execution_logs WHERE device_serial = ? ORDER BY timestamp DESC LIMIT 50`, [dev.serial_number]);
-    res.json({ success: true, data: { device: dev, recent_logs: logs } });
+    res.json({ success: true, data: { device: publicDevice(dev), recent_logs: logs.map(log => ({ ...log, result_data: JSON.stringify(labControl.sanitize(logic.safeJson(log.result_data, {}))) })) } });
   });
 
   app.put('/api/v1/devices/:id', (req, res) => {
@@ -433,7 +745,7 @@ function createServer(db, routerPort, apiToken = '') {
         status: req.query.status,
         country: req.query.country,
         search: req.query.search,
-      }),
+      }).map(({ username, ...safe }) => safe),
     });
   });
 
@@ -630,6 +942,11 @@ function createServer(db, routerPort, apiToken = '') {
   app.post('/api/v1/workflows', (req, res) => {
     const { name, description, steps, allowed_package, device_ids } = req.body;
     if (!name || !steps || !Array.isArray(steps)) return res.status(422).json({ success: false, message: 'Nombre y pasos válidos son requeridos' });
+    const validation = logic.validateWorkflowSteps(steps);
+    if (labControl.state().lab_mode_enabled && !validation.valid) {
+      return res.status(422).json({ success: false, message: validation.errors.join('; '), data: validation });
+    }
+
 
     const r = db.run(`INSERT INTO workflows(name, description, steps, allowed_package, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`,
       [name, description || null, JSON.stringify(steps), allowed_package || null, 'draft', now(), now()]);
@@ -648,6 +965,11 @@ function createServer(db, routerPort, apiToken = '') {
     const wf = db.get(`SELECT * FROM workflows WHERE id = ?`, [req.params.id]);
     if (!wf) return res.status(404).json({ success: false, message: 'Workflow not found' });
     const { name, description, steps, allowed_package, status, device_ids } = req.body;
+    if (steps && labControl.state().lab_mode_enabled) {
+      const validation = logic.validateWorkflowSteps(steps);
+      if (!validation.valid) return res.status(422).json({ success: false, message: validation.errors.join('; '), data: validation });
+    }
+
 
     db.run(`UPDATE workflows SET name=COALESCE(?,name), description=COALESCE(?,description), steps=COALESCE(?,steps), allowed_package=COALESCE(?,allowed_package), status=COALESCE(?,status), updated_at=? WHERE id=?`,
       [name || null, description || null, steps ? JSON.stringify(steps) : null, allowed_package || null, status || null, now(), wf.id]);
@@ -685,7 +1007,8 @@ function createServer(db, routerPort, apiToken = '') {
   app.post('/api/v1/workflows/:id/validate', (req, res) => {
     const wf = db.get(`SELECT * FROM workflows WHERE id = ?`, [req.params.id]);
     const steps = req.body.steps || (wf ? logic.safeJson(wf.steps, []) : []);
-    res.json({ success: true, data: { valid: true, steps_count: steps.length } });
+    const validation = logic.validateWorkflowSteps(steps);
+    res.status(validation.valid ? 200 : 422).json({ success: validation.valid, data: validation });
   });
 
   // ==========================================
@@ -746,9 +1069,12 @@ function createServer(db, routerPort, apiToken = '') {
     if (task.status !== 'scheduled' && task.status !== 'running') {
       return res.status(422).json({ success: false, message: `Cannot cancel task with status: ${task.status}` });
     }
-    db.run(`UPDATE tasks SET status = 'cancelled', completed_at = ? WHERE id = ?`, [now(), task.id]);
-    db.run(`UPDATE devices SET status = 'online', current_task_id = NULL WHERE current_task_id = ?`, [task.id]);
-    res.json({ success: true, data: db.get(`SELECT * FROM tasks WHERE id = ?`, [task.id]), message: 'Task cancelled successfully' });
+    if (task.status === 'running') {
+      db.run(`UPDATE tasks SET status='cancel_requested',error_message='Cancellation requested',updated_at=? WHERE id=?`, [now(), task.id]);
+    } else {
+      db.run(`UPDATE tasks SET status='cancelled',completed_at=?,updated_at=? WHERE id=?`, [now(), now(), task.id]);
+    }
+    res.json({ success: true, data: db.get(`SELECT * FROM tasks WHERE id = ?`, [task.id]), message: task.status === 'running' ? 'Cancellation requested' : 'Task cancelled successfully' });
   });
 
   // Stop Task: para todo lo que esté en cola o corriendo en los dispositivos
@@ -1291,6 +1617,7 @@ function createServer(db, routerPort, apiToken = '') {
   });
   app.post('/api/v1/hermes/configure', async (req, res) => {
     try {
+    if (!labControl.hermesAllowed()) return res.status(423).json({ success: false, message: 'Hermes is disabled for this lab' });
       const data = await hermes.configure();
       res.json({ success: true, data, message: data.message });
     } catch (error) {
@@ -1299,6 +1626,7 @@ function createServer(db, routerPort, apiToken = '') {
   });
   app.post('/api/v1/hermes/test', async (req, res) => {
     try {
+    if (!labControl.hermesAllowed()) return res.status(423).json({ success: false, message: 'Hermes is disabled for this lab' });
       const data = await hermes.testConnection();
       res.status(data.success ? 200 : 502).json({ success: data.success, data, message: data.message });
     } catch (error) {
@@ -1307,6 +1635,7 @@ function createServer(db, routerPort, apiToken = '') {
   });
   app.delete('/api/v1/hermes/connection', async (req, res) => {
     try {
+    if (!labControl.hermesAllowed()) return res.status(423).json({ success: false, message: 'Hermes is disabled for this lab' });
       const data = await hermes.disconnect();
       res.json({ success: true, data, message: data.message });
     } catch (error) {
