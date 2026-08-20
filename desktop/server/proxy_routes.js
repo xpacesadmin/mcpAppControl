@@ -8,6 +8,7 @@ let GET_DEVICE_PROXY = null;
 let APPLY_DEVICE_PROXY = null;
 let RESTORE_DEVICE_PROXY = null;
 let PROBE_DEVICE_ROUTE = null;
+let REQUEST_PROVIDER_ROTATION = null;
 
 const PROTOCOLS = new Set(['HTTP', 'HTTPS', 'SOCKS5']);
 const ROUTE_ID_RE = /^[a-z0-9][a-z0-9._-]{2,63}$/;
@@ -21,6 +22,7 @@ function init(db, options = {}) {
   APPLY_DEVICE_PROXY = options.applyDeviceProxy || null;
   RESTORE_DEVICE_PROXY = options.restoreDeviceProxy || null;
   PROBE_DEVICE_ROUTE = options.probeDeviceRoute || null;
+  REQUEST_PROVIDER_ROTATION = options.requestProviderRotation || null;
 }
 
 function requireDb() {
@@ -474,6 +476,56 @@ async function rotate(input = {}) {
   };
 }
 
+async function requestProviderRotation(routeId, input = {}) {
+  requireDb();
+  rejectSecrets(input);
+  if (input.confirm !== true) throw new Error('confirm=true requerido');
+  const normalizedRouteId = String(routeId || '').trim().toLowerCase();
+  if (!ROUTE_ID_RE.test(normalizedRouteId)) throw new Error('route_id inválido');
+  const deviceId = Number(input.device_id);
+  if (!Number.isInteger(deviceId) || deviceId <= 0) throw new Error('device_id inválido');
+  labControl.assertDeviceAllowed(deviceId);
+
+  if (input.idempotency_key) {
+    const prior = DB.get('SELECT * FROM audit_events WHERE idempotency_key=?', [input.idempotency_key]);
+    if (prior) return { requested: true, idempotent_replay: true, route: inspect(normalizedRouteId) };
+  }
+
+  const route = DB.get('SELECT * FROM proxy_routes WHERE route_id=?', [normalizedRouteId]);
+  const assignment = activeAssignmentForDevice(deviceId);
+  if (!route) throw new Error('Ruta no encontrada');
+  if (!assignment || assignment.route_id !== normalizedRouteId) {
+    throw new Error('La ruta no es la asignación activa esperada para el dispositivo');
+  }
+  if (!REQUEST_PROVIDER_ROTATION) throw new Error('Adaptador de rotación de Proxy Orch no configurado');
+
+  try {
+    const result = await REQUEST_PROVIDER_ROTATION({
+      route_id: normalizedRouteId,
+      device_id: deviceId,
+      idempotency_key: input.idempotency_key,
+      timeout_ms: input.timeout_ms,
+    });
+    if (!result || result.accepted !== true) throw new Error('Proxy Orch did not accept the rotation request');
+    const safeResult = {
+      accepted: !!(result && result.accepted),
+      status: result && result.status != null ? Number(result.status) : null,
+      request_id: result && result.request_id ? String(result.request_id) : null,
+    };
+    labControl.audit('proxy_route.request_provider_rotation', 'ok', safeResult, {
+      ...input, route_id: normalizedRouteId, device_id: deviceId,
+    });
+    return { requested: true, route: inspect(normalizedRouteId), proxy_orch: safeResult };
+  } catch (error) {
+    labControl.audit('proxy_route.request_provider_rotation', 'failed', { error: error.message }, {
+      ...input,
+      idempotency_key: input.idempotency_key ? input.idempotency_key + ':failed' : null,
+      route_id: normalizedRouteId,
+      device_id: deviceId,
+    });
+    throw error;
+  }
+}
 function extractIp(result) {
   const data = result && result.data ? result.data : result;
   return data && (data.external_ip || data.public_ip || data.ip) ? String(data.external_ip || data.public_ip || data.ip).trim() : null;
@@ -520,4 +572,4 @@ async function verifyDeviceEgress(routeId, input = {}) {
   return { matches, expected_public_ip: route.expected_public_ip, observed_public_ip: observed, rollback, route: inspect(routeId) };
 }
 
-module.exports = { init, list, inspect, enroll, testRoute, assign, release, rotate, verifyDeviceEgress, rejectSecrets, publicRoute, parseProxyState, selectRotationTarget };
+module.exports = { init, list, inspect, enroll, testRoute, assign, release, rotate, requestProviderRotation, verifyDeviceEgress, rejectSecrets, publicRoute, parseProxyState, selectRotationTarget };

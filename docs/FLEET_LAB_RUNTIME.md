@@ -8,7 +8,7 @@ owner-approved ADB serials.
 
 Create this local file on the machine running the desktop application:
 
-    %APPDATA%MCP Control Bsolutions V2leet-allowlist.txt
+    %APPDATA%\MCP Control Bsolutions V2leet-allowlist.txt
 
 Put one approved ADB serial on each line. Blank lines and lines beginning with
 # are ignored. Do not put account credentials, proxy credentials, tokens, or
@@ -54,3 +54,20 @@ replaced by the soft-router route script without changing the MCP tool contract.
 The upstream scrcpy mirror is available in the lab dashboard. Its WebSocket and
 frame endpoints validate the selected canary before starting a session. Opening
 a mirror does not enable Hermes.
+
+## Provider IP refresh requests
+
+request_proxy_rotation does not accept a rotation URL, headers, a token, or a
+request body. It sends only the active route ID, named device ID, and idempotency
+key to an internal Proxy Orch control adapter. Configure the Lab VM with:
+
+    MCP_PROXY_ORCH_CONTROL_URL=http://<private-proxy-orch-control-address>:<port>
+    MCP_PROXY_ORCH_CONTROL_TOKEN_FILE=<restricted-local-token-file>
+
+The token file is an MCP-to-Proxy-Orch control credential; upstream provider
+credentials and provider refresh URLs remain on Proxy Orch. The control endpoint
+must implement POST /api/v1/proxy-routes/{route_id}/rotate. Until that adapter is
+deployed, the MCP returns a configuration error and performs no rotation.
+
+The collaborator's legacy /api/v1/proxy_rotation endpoints are disabled because
+they stored provider URLs, headers, and request bodies in the MCP database.

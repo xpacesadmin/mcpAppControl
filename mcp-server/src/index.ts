@@ -294,6 +294,21 @@ const TOOLS = [
         },
     },
     {
+        name: "request_proxy_rotation",
+        description: "Requests an IP refresh for one named device through its active Proxy Orch route. Provider URLs and credentials never enter MCP input or output.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                route_id: { type: "string" },
+                device_id: { type: "number" },
+                confirm: { type: "boolean" },
+                idempotency_key: { type: "string" },
+                timeout_ms: { type: "number", minimum: 1000, maximum: 30000 },
+            },
+            required: ["route_id", "device_id", "confirm", "idempotency_key"],
+        },
+    },
+    {
         name: "set_device_proxy_direct",
         description: "Releases any active named route and clears Android's global proxy for one named canary",
         inputSchema: {
@@ -911,6 +926,8 @@ async function callTool(name: string, params: any) {
             return apiPost(`/proxy-routes/${params.route_id}/release`, params);
         case "rotate_proxy_route":
             return apiPost(`/devices/${params.device_id}/proxy-route/rotate`, params);
+        case "request_proxy_rotation":
+            return apiPost(`/proxy-routes/${params.route_id}/request-provider-rotation`, params);
         case "set_device_proxy_direct":
             return apiPost(`/devices/${params.device_id}/proxy-control/direct`, params);
         case "verify_device_egress":

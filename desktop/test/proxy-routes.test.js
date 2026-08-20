@@ -263,3 +263,40 @@ test('rotation mismatch restores and reactivates the previous route', async t =>
   assert.equal(proxyRoutes.inspect('fleet-canary-02').assignment, null);
   assert.equal(labControl.state().halted, true);
 });
+test('provider rotation delegates only route metadata to Proxy Orch and is idempotent', async t => {
+  const db = await dbServer.open(':memory:');
+  t.after(() => db.close());
+  addDevice(db);
+  labControl.init(db);
+  labControl.configure({ confirm: true, canary_device_id: 1 });
+  const adapter = createAdapter();
+  const calls = [];
+  proxyRoutes.init(db, {
+    ...adapter.options,
+    requestProviderRotation: async input => {
+      calls.push(input);
+      return { accepted: true, status: 202, request_id: input.idempotency_key };
+    },
+  });
+
+  enrollRoute();
+  await proxyRoutes.assign('fleet-canary-01', {
+    confirm: true,
+    device_id: 1,
+    expected_previous_route_id: null,
+    idempotency_key: 'provider-assign-1',
+  });
+  const input = {
+    confirm: true,
+    device_id: 1,
+    idempotency_key: 'provider-rotate-1',
+  };
+  const result = await proxyRoutes.requestProviderRotation('fleet-canary-01', input);
+  const replay = await proxyRoutes.requestProviderRotation('fleet-canary-01', input);
+
+  assert.equal(result.requested, true);
+  assert.equal(result.proxy_orch.status, 202);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(Object.keys(calls[0]).sort(), ['device_id', 'idempotency_key', 'route_id', 'timeout_ms']);
+  assert.equal(replay.idempotent_replay, true);
+});

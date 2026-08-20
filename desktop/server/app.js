@@ -12,6 +12,7 @@ const deviceAccounts = require('./device_accounts');
 const proxies = require('./proxies');
 const labControl = require('./lab_control');
 const proxyRoutes = require('./proxy_routes');
+const proxyOrchControl = require('./proxy_orch_control');
 const hermes = require('./hermes');
 const settings = require('./settings');
 const views = require('./views');
@@ -73,6 +74,7 @@ function createServer(db, routerPort, apiToken = '') {
       expected_public_ip: route.expected_public_ip,
       timeout_ms: timeoutMs,
     }),
+    requestProviderRotation: input => proxyOrchControl.requestRotation(input),
   });
   deviceAccounts.init(db, { dispatchDevice: (serial, command, params) => logic.routerDispatch(serial, command, params) });
 
@@ -81,6 +83,15 @@ function createServer(db, routerPort, apiToken = '') {
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
   // Middleware CORS & Token Auth
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/api/v1/proxy_rotation')) {
+      return res.status(410).json({
+        success: false,
+        message: 'Direct provider rotation URLs are disabled. Use a credential-free Proxy Orch route rotation request.',
+      });
+    }
+    return next();
+  });
   app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
@@ -189,6 +200,14 @@ function createServer(db, routerPort, apiToken = '') {
     try {
       const body = req.body || {};
       const result = await proxyRoutes.rotate({ ...body, device_id: Number(req.params.id) });
+      res.json({ success: true, data: result });
+    } catch (error) {
+      res.status(422).json({ success: false, message: error.message });
+    }
+  });
+  app.post('/api/v1/proxy-routes/:routeId/request-provider-rotation', async (req, res) => {
+    try {
+      const result = await proxyRoutes.requestProviderRotation(req.params.routeId, req.body || {});
       res.json({ success: true, data: result });
     } catch (error) {
       res.status(422).json({ success: false, message: error.message });
