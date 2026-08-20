@@ -11,8 +11,8 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = $PSScriptRoot
 $desktopRoot = Join-Path $projectRoot 'desktop'
-$adbPath = Join-Path $desktopRoot 'vendorplatform-toolsadb.exe'
-$logRoot = Join-Path $env:LOCALAPPDATA 'MCP-Control-Bsolutionslogs'
+$adbPath = Join-Path $desktopRoot 'vendor\platform-tools\adb.exe'
+$logRoot = Join-Path $env:LOCALAPPDATA 'MCP-Control-Bsolutions\logs'
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 
 # Safe lab defaults. Fleet expansion is driven only by the explicit local
@@ -48,12 +48,12 @@ Write-Host 'Hermes connector: disabled'
 Write-Host 'Network scan: disabled'
 
 $packagedCandidates = @(
-    (Join-Path $desktopRoot 'release-finalwin-unpackedBsolutions Control App.exe'),
-    (Join-Path $desktopRoot 'release-installerwin-unpackedBsolutions Control App.exe'),
-    (Join-Path $desktopRoot 'releasewin-unpackedBsolutions Control App.exe'),
-    (Join-Path $desktopRoot 'release-finalwin-unpackedMCP AppControl.exe'),
-    (Join-Path $desktopRoot 'release-installerwin-unpackedMCP AppControl.exe'),
-    (Join-Path $desktopRoot 'releasewin-unpackedMCP AppControl.exe')
+    (Join-Path $desktopRoot 'release-final\win-unpacked\Bsolutions Control App.exe'),
+    (Join-Path $desktopRoot 'release-installer\win-unpacked\Bsolutions Control App.exe'),
+    (Join-Path $desktopRoot 'release\win-unpacked\Bsolutions Control App.exe'),
+    (Join-Path $desktopRoot 'release-final\win-unpacked\MCP AppControl.exe'),
+    (Join-Path $desktopRoot 'release-installer\win-unpacked\MCP AppControl.exe'),
+    (Join-Path $desktopRoot 'release\win-unpacked\MCP AppControl.exe')
 )
 
 $packagedApp = $packagedCandidates |
@@ -66,7 +66,7 @@ if ($packagedApp) {
     return
 }
 
-$electronBinary = Join-Path $desktopRoot 'node_moduleselectrondistelectron.exe'
+$electronBinary = Join-Path $desktopRoot 'node_modules\electron\dist\electron.exe'
 if (-not (Test-Path -LiteralPath $electronBinary -PathType Leaf)) {
     throw 'No Windows build or local Electron dependency found. Run: cd desktop; npm install'
 }
