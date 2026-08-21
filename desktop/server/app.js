@@ -458,7 +458,12 @@ function createServer(db, routerPort, apiToken = '') {
     if (req.query.status) { sql += ` AND d.status = ?`; params.push(req.query.status); }
     if (req.query.search) { sql += ` AND (d.name LIKE ? OR d.serial_number LIKE ?)`; params.push(`%${req.query.search}%`, `%${req.query.search}%`); }
     sql += ` ORDER BY CASE d.status WHEN 'online' THEN 0 WHEN 'busy' THEN 1 WHEN 'error' THEN 2 ELSE 3 END, d.id ASC`;
-    const list = db.all(sql, params).map(publicDevice);
+    const control = labControl.state();
+    const list = db.all(sql, params).map(device => ({
+      ...publicDevice(device),
+      screen_control_allowed: !control.lab_mode_enabled
+        || Number(device.id) === Number(control.canary_device_id),
+    }));
     res.json({ success: true, data: paginate(list, req.query.page, req.query.per_page) });
   });
 

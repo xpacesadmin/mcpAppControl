@@ -192,13 +192,14 @@ function renderDevices() {
 
     grid.innerHTML = devices.map((d, index) => {
         const isOnline = ['online', 'busy'].includes(d.status);
+        const screenAllowed = canViewScreen(d);
         const statusText = d.status === 'busy' ? 'Operando' : (d.status === 'online' ? 'Listo' : 'Desconectado');
         const statusClass = d.status === 'busy' ? 'busy' : (d.status === 'online' ? 'online' : 'offline');
         const savedFrame = lastDeviceScreenFrames.get(d.id);
         const isTcp = d.transport === 'tcp' || String(d.adb_serial || d.serial_number).includes(':');
 
         return `
-        <div class="phone-mockup-card ${selectedDeviceIds.has(d.id) ? 'selected' : ''}" data-device-id="${Number(d.id)}" data-name="${escapeAttr(d.name || d.serial_number)}" title="${escapeAttr(d.name || d.serial_number)}" onclick="openScreenViewer(${Number(d.id)})">
+        <div class="phone-mockup-card ${selectedDeviceIds.has(d.id) ? 'selected' : ''}" data-device-id="${Number(d.id)}" data-name="${escapeAttr(d.name || d.serial_number)}" title="${escapeAttr(d.name || d.serial_number)}" ${screenAllowed ? `onclick="openScreenViewer(${Number(d.id)})"` : ''}>
             <div class="phone-card-header">
                 <span class="phone-status-badge ${statusClass}">
                     <span class="status-dot"></span> ${statusText}
@@ -209,7 +210,7 @@ function renderDevices() {
             <div class="phone-screen-frame">
                 ${isOnline ? `
                     <img id="screenWallFrame-${Number(d.id)}" src="${savedFrame || ''}" style="${savedFrame ? 'display:block;' : 'display:none;'}" alt="Pantalla ${escapeAttr(d.name || d.serial_number)}">
-                    <div class="phone-placeholder" id="screenWallPlaceholder-${Number(d.id)}" style="${savedFrame ? 'display:none;' : ''}">Cargando transmisión…</div>
+                    <div class="phone-placeholder" id="screenWallPlaceholder-${Number(d.id)}" style="${savedFrame ? 'display:none;' : ''}">${screenAllowed ? 'Cargando transmisión…' : 'Inventario activo · control de pantalla reservado al canario'}</div>
                 ` : `
                     <div class="phone-placeholder">
                         Pantalla no disponible sin conexión
@@ -239,7 +240,8 @@ function renderDevices() {
 }
 
 function canViewScreen(device) {
-    return ['online', 'busy'].includes(device?.status);
+    return ['online', 'busy'].includes(device?.status)
+        && device?.screen_control_allowed !== false;
 }
 
 function toggleDeviceSelection(deviceId, selected) {
