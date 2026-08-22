@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const { now } = require('./db');
 
 let DB = null;
@@ -85,6 +87,8 @@ function state() {
   return {
     lab_mode_enabled: !!(row && row.lab_mode_enabled),
     halted: !!(row && row.halted),
+    lab_scope: configuredLabScope(),
+    allowlisted_device_count: configuredDeviceAllowlist().size,
     canary_device_id: row ? row.canary_device_id : null,
     canary_device: canary || null,
     hermes_enabled: !!(row && row.hermes_enabled),
@@ -146,20 +150,54 @@ function assertOperational() {
   return current;
 }
 
+function configuredLabScope() {
+  return String(process.env.MCP_LAB_SCOPE || 'canary').trim().toLowerCase() === 'allowlist'
+    ? 'allowlist'
+    : 'canary';
+}
+
+function configuredDeviceAllowlist() {
+  const values = String(process.env.MCP_ADB_ALLOWLIST || '')
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean);
+  const allowlistFile = String(process.env.MCP_ADB_ALLOWLIST_FILE || '').trim();
+  if (allowlistFile) {
+    if (!path.isAbsolute(allowlistFile)) throw new Error('MCP_ADB_ALLOWLIST_FILE must be absolute');
+    const lines = fs.readFileSync(allowlistFile, 'utf8')
+      .split(/\r?\n/)
+      .map(value => value.trim())
+      .filter(value => value && !value.startsWith('#'));
+    values.push(...lines);
+  }
+  return new Set(values);
+}
+
+function deviceMatchesAllowlist(device, allowlist) {
+  if (!device || allowlist.size === 0) return false;
+  return [device.adb_serial, device.serial_number]
+    .filter(Boolean)
+    .some(value => allowlist.has(String(value).trim()));
+}
+
 function assertDeviceInScope(deviceId) {
   const current = state();
   if (!current.lab_mode_enabled) return current;
+  if (configuredLabScope() === 'allowlist') {
+    const device = DB.get('SELECT id,serial_number,adb_serial FROM devices WHERE id=?', [Number(deviceId)]);
+    if (!device) throw new Error('Dispositivo no encontrado');
+    if (!deviceMatchesAllowlist(device, configuredDeviceAllowlist())) {
+      throw new Error('Operation is outside the exact lab device allowlist');
+    }
+    return current;
+  }
   if (!current.canary_device_id) throw new Error('Configure a canary device first');
   if (Number(deviceId) !== Number(current.canary_device_id)) throw new Error('Operation is outside the canary device');
   return current;
 }
 function assertDeviceAllowed(deviceId) {
   assertOperational();
-  const current = assertDeviceInScope(deviceId);
-  if (!current.lab_mode_enabled) return current;
-  if (!current.canary_device_id) throw new Error('Primero configure un dispositivo canario');
-  if (Number(deviceId) !== Number(current.canary_device_id)) throw new Error('Operación fuera del dispositivo canario');
-  return current;
+  return assertDeviceInScope(deviceId);
 }
 
 function validateStep(step, index = 0) {
@@ -235,6 +273,7 @@ module.exports = {
   configure,
   audit,
   sanitize,
+  configuredDeviceAllowlist,
   assertOperational,
   assertDeviceInScope,
   assertDeviceAllowed,

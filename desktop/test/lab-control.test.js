@@ -12,6 +12,14 @@ function addDevice(db, id = 1) {
   );
 }
 
+function addNamedDevice(db, id, serialNumber, adbSerial) {
+  const timestamp = dbServer.now();
+  db.run(
+    'INSERT INTO devices(id,name,serial_number,adb_serial,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)',
+    [id, `Fleet ${id}`, serialNumber, adbSerial, 'online', timestamp, timestamp]
+  );
+}
+
 test('lab mode is safe by default and validates bounded canary workflows', async t => {
   const db = await dbServer.open(':memory:');
   t.after(() => db.close());
@@ -53,6 +61,35 @@ test('audit redaction removes credential values and URI userinfo', async t => {
   assert.equal(details.nested.token, '[REDACTED]');
   assert.equal(details.url, 'http://[REDACTED]@example.test/path');
   assert.equal(row.details.includes('do-not-store'), false);
+});
+
+test('allowlist lab scope permits only exact configured fleet serials', async t => {
+  const previousScope = process.env.MCP_LAB_SCOPE;
+  const previousAllowlist = process.env.MCP_ADB_ALLOWLIST;
+  process.env.MCP_LAB_SCOPE = 'allowlist';
+  process.env.MCP_ADB_ALLOWLIST = '192.168.60.199:5555,192.168.60.167:5555';
+  t.after(() => {
+    if (previousScope === undefined) delete process.env.MCP_LAB_SCOPE;
+    else process.env.MCP_LAB_SCOPE = previousScope;
+    if (previousAllowlist === undefined) delete process.env.MCP_ADB_ALLOWLIST;
+    else process.env.MCP_ADB_ALLOWLIST = previousAllowlist;
+  });
+
+  const db = await dbServer.open(':memory:');
+  t.after(() => db.close());
+  addNamedDevice(db, 1, 'fleet-one', '192.168.60.199:5555');
+  addNamedDevice(db, 2, 'fleet-two', '192.168.60.167:5555');
+  addNamedDevice(db, 3, 'fleet-three', '192.168.60.168:5555');
+  labControl.init(db);
+  labControl.configure({ confirm: true, canary_device_id: 1 });
+
+  assert.equal(labControl.state().lab_scope, 'allowlist');
+  assert.equal(labControl.state().allowlisted_device_count, 2);
+  assert.equal(labControl.state().hermes_enabled, false);
+  assert.doesNotThrow(() => labControl.assertDeviceAllowed(1));
+  assert.doesNotThrow(() => labControl.assertDeviceAllowed(2));
+  assert.throws(() => labControl.assertDeviceAllowed(3), /exact lab device allowlist/i);
+  assert.throws(() => labControl.assertDeviceAllowed(999), /no encontrado/i);
 });
 
 test('emergency stop is idempotent and requests cancellation without clearing proxy state', async t => {

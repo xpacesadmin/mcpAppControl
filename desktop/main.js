@@ -260,7 +260,7 @@ app.whenReady().then(async () => {
       wsPort: WS_PORT,                           // para abrir el túnel `adb reverse` que deja al agente alcanzar el router
       frameMaxWidth: 0, frameQuality: 55,        // visor enfocado: resolución NATIVA (para que el toque caiga donde se hace clic) + JPEG
       thumbMaxWidth: 240, thumbQuality: 40, thumbTtlMs: 1500,  // miniaturas del muro (ligeras, escala 40+)
-      allowedSerials: String(process.env.MCP_ADB_ALLOWLIST || '').split(',').map(s => s.trim()).filter(Boolean),
+      allowedSerials: [...labControl.configuredDeviceAllowlist()],
       requireAllowlist: labControl.state().lab_mode_enabled,
       suppressStartupWrites: labControl.state().lab_mode_enabled,
       allowNetworkScan: false,
