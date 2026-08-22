@@ -3,7 +3,7 @@ param(
     [string]$FleetAllowlistFile = $(if ($env:MCP_ADB_ALLOWLIST_FILE) {
         $env:MCP_ADB_ALLOWLIST_FILE
     } else {
-        Join-Path $env:APPDATA 'MCP Control Bsolutions V2leet-allowlist.txt'
+        Join-Path $env:APPDATA 'MCP Control Bsolutions V2\fleet-allowlist.txt'
     })
 )
 
@@ -18,6 +18,7 @@ New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 # Safe lab defaults. Fleet expansion is driven only by the explicit local
 # allowlist; no subnet scan or automatic agent installation is performed.
 $env:MCP_LAB_MODE = '1'
+$env:MCP_LAB_SCOPE = 'allowlist'
 $env:MCP_CANARY_FULL = '1'
 $env:MCP_HERMES_ENABLED = '0'
 $env:MCP_AUTO_INSTALL_AGENT = '0'
