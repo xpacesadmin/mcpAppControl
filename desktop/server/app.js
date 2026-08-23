@@ -483,8 +483,7 @@ function createServer(db, routerPort, apiToken = '') {
     const control = labControl.state();
     const list = db.all(sql, params).map(device => ({
       ...publicDevice(device),
-      screen_control_allowed: !control.lab_mode_enabled
-        || Number(device.id) === Number(control.canary_device_id),
+      screen_control_allowed: !control.lab_mode_enabled || labControl.isDeviceInScope(device.id),
     }));
     res.json({ success: true, data: paginate(list, req.query.page, req.query.per_page) });
   });
@@ -545,8 +544,13 @@ function createServer(db, routerPort, apiToken = '') {
     try {
       const control = labControl.state();
       if (control.lab_mode_enabled) {
-        if (device_ids.length !== 1) throw new Error('Lab commands require exactly one device');
-        labControl.assertDeviceAllowed(Number(device_ids[0]));
+        if (control.lab_scope === 'canary' && device_ids.length !== 1) {
+          throw new Error('Canary commands require exactly one device');
+        }
+        if (control.lab_scope === 'allowlist' && device_ids.length > control.allowlisted_device_count) {
+          throw new Error('Command exceeds the exact lab device allowlist');
+        }
+        device_ids.forEach(id => labControl.assertDeviceAllowed(Number(id)));
         const validation = labControl.validateStep(step);
         if (validation.length) throw new Error(validation.join('; '));
       }
@@ -2108,9 +2112,16 @@ function createServer(db, routerPort, apiToken = '') {
   app.post('/api/v1/devices/:id/batch-commands', async (req, res) => {
     const dev = db.get(`SELECT * FROM devices WHERE id = ? OR serial_number = ?`, [req.params.id, req.params.id]);
     if (!dev) return res.status(404).json({ success: false, message: 'Device not found' });
+    try { labControl.assertDeviceAllowed(dev.id); }
+    catch (error) { return res.status(403).json({ success: false, message: error.message }); }
     if (!dev.adb_serial || !adb.has || !adb.has(dev.adb_serial)) return res.status(409).json({ success: false, message: 'No conectado por ADB' });
     const { commands } = req.body || {};
     if (!Array.isArray(commands) || !commands.length) return res.status(422).json({ success: false, message: 'commands es requerido' });
+    for (const cmd of commands) {
+      const step = { type: cmd && cmd.type, ...((cmd && cmd.params) || {}) };
+      const validation = labControl.validateStep(step);
+      if (validation.length) return res.status(422).json({ success: false, message: validation.join('; ') });
+    }
     const results = [];
     for (const cmd of commands) {
       const r = await adb.execute(dev.adb_serial, cmd.type, cmd.params || {});

@@ -198,12 +198,20 @@ async function dispatchWorkflow(workflow, { groupId = null, deviceIds = null, pa
   if (control.lab_mode_enabled) {
     const validation = labControl.validateWorkflowSteps(steps);
     if (!validation.valid) return { task: null, devices_assigned: 0, message: validation.errors.join('; ') };
-    if (groupId != null) return { task: null, devices_assigned: 0, message: 'group_id is not allowed during the canary' };
-    if (!Array.isArray(deviceIds) || deviceIds.length !== 1) {
+    if (groupId != null) return { task: null, devices_assigned: 0, message: 'Lab mode requires explicit device_ids instead of group_id' };
+    if (!Array.isArray(deviceIds) || !deviceIds.length) {
+      return { task: null, devices_assigned: 0, message: 'Lab mode requires explicit device_ids' };
+    }
+    if (control.lab_scope === 'canary' && deviceIds.length !== 1) {
       return { task: null, devices_assigned: 0, message: 'The canary requires exactly one explicit device_id' };
     }
-    try { labControl.assertDeviceAllowed(Number(deviceIds[0])); }
-    catch (error) { return { task: null, devices_assigned: 0, message: error.message }; }
+    if (control.lab_scope === 'allowlist' && deviceIds.length > control.allowlisted_device_count) {
+      return { task: null, devices_assigned: 0, message: 'Workflow exceeds the exact lab device allowlist' };
+    }
+    try { deviceIds.forEach(id => labControl.assertDeviceAllowed(Number(id))); }
+    catch (error) {
+      return { task: null, devices_assigned: 0, message: error.message };
+    }
   }
   const devices = selectDevices({ groupId, deviceIds, workflowId: workflow.id });
   if (!devices.length) return { task: null, devices_assigned: 0, message: 'No hay dispositivos online' };

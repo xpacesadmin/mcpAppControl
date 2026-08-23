@@ -66,13 +66,17 @@ test('audit redaction removes credential values and URI userinfo', async t => {
 test('allowlist lab scope permits only exact configured fleet serials', async t => {
   const previousScope = process.env.MCP_LAB_SCOPE;
   const previousAllowlist = process.env.MCP_ADB_ALLOWLIST;
+  const previousFull = process.env.MCP_LAB_FULL;
   process.env.MCP_LAB_SCOPE = 'allowlist';
   process.env.MCP_ADB_ALLOWLIST = '192.168.60.199:5555,192.168.60.167:5555';
+  process.env.MCP_LAB_FULL = 'true';
   t.after(() => {
     if (previousScope === undefined) delete process.env.MCP_LAB_SCOPE;
     else process.env.MCP_LAB_SCOPE = previousScope;
     if (previousAllowlist === undefined) delete process.env.MCP_ADB_ALLOWLIST;
     else process.env.MCP_ADB_ALLOWLIST = previousAllowlist;
+    if (previousFull === undefined) delete process.env.MCP_LAB_FULL;
+    else process.env.MCP_LAB_FULL = previousFull;
   });
 
   const db = await dbServer.open(':memory:');
@@ -85,11 +89,20 @@ test('allowlist lab scope permits only exact configured fleet serials', async t 
 
   assert.equal(labControl.state().lab_scope, 'allowlist');
   assert.equal(labControl.state().allowlisted_device_count, 2);
+  assert.equal(labControl.state().lab_full_enabled, true);
   assert.equal(labControl.state().hermes_enabled, false);
   assert.doesNotThrow(() => labControl.assertDeviceAllowed(1));
   assert.doesNotThrow(() => labControl.assertDeviceAllowed(2));
   assert.throws(() => labControl.assertDeviceAllowed(3), /exact lab device allowlist/i);
   assert.throws(() => labControl.assertDeviceAllowed(999), /no encontrado/i);
+  assert.equal(labControl.isDeviceInScope(1), true);
+  assert.equal(labControl.isDeviceInScope(3), false);
+  assert.equal(labControl.validateStep({ type: 'CUSTOM_DEVICE_TEST' }).length, 0);
+  assert.match(
+    labControl.validateStep({ type: 'REBOOT' }).join(' '),
+    /confirm=true/i,
+  );
+  assert.equal(labControl.validateStep({ type: 'REBOOT', confirm: true }).length, 0);
 });
 
 test('emergency stop is idempotent and requests cancellation without clearing proxy state', async t => {

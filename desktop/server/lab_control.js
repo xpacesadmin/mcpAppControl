@@ -25,7 +25,10 @@ const SAFE_LAB_STEPS = new Set([
   'REPORT_RESULT',
 ]);
 
-const CANARY_FULL_ENABLED = /^(1|true|yes)$/i.test(String(process.env.MCP_CANARY_FULL || ''));
+function labFullEnabled() {
+  return /^(1|true|yes)$/i.test(String(process.env.MCP_LAB_FULL || process.env.MCP_CANARY_FULL || ''));
+}
+
 const CANARY_FULL_STEPS = new Set([
   ...SAFE_LAB_STEPS,
   'SWIPE', 'TAP_XY', 'INPUT_KEYEVENT', 'TYPE_TEXT',
@@ -92,7 +95,8 @@ function state() {
     canary_device_id: row ? row.canary_device_id : null,
     canary_device: canary || null,
     hermes_enabled: !!(row && row.hermes_enabled),
-    canary_full_enabled: CANARY_FULL_ENABLED,
+    canary_full_enabled: labFullEnabled(),
+    lab_full_enabled: labFullEnabled(),
     halt_reason: row ? row.halt_reason : null,
     updated_at: row ? row.updated_at : null,
   };
@@ -195,6 +199,10 @@ function assertDeviceInScope(deviceId) {
   if (Number(deviceId) !== Number(current.canary_device_id)) throw new Error('Operation is outside the canary device');
   return current;
 }
+function isDeviceInScope(deviceId) {
+  try { assertDeviceInScope(deviceId); return true; }
+  catch (_) { return false; }
+}
 function assertDeviceAllowed(deviceId) {
   assertOperational();
   return assertDeviceInScope(deviceId);
@@ -205,10 +213,12 @@ function validateStep(step, index = 0) {
   if (!step || typeof step !== 'object' || Array.isArray(step)) return [`Paso ${index + 1}: objeto requerido`];
   const type = String(step.type || '');
   if (!type) return [`Paso ${index + 1}: type requerido`];
-  const allowed = SAFE_LAB_STEPS.has(type) || (CANARY_FULL_ENABLED && CANARY_FULL_STEPS.has(type));
+  const full = labFullEnabled();
+  const cohortFull = full && configuredLabScope() === 'allowlist';
+  const allowed = SAFE_LAB_STEPS.has(type) || cohortFull || (full && CANARY_FULL_STEPS.has(type));
   if (!allowed) errors.push(`Paso ${index + 1}: ${type} no permitido en modo laboratorio`);
-  if (CANARY_FULL_ENABLED && CONFIRMATION_REQUIRED_STEPS.has(type) && step.confirm !== true) {
-    errors.push(`Paso ${index + 1}: ${type} requiere confirm=true en modo canario completo`);
+  if (full && CONFIRMATION_REQUIRED_STEPS.has(type) && step.confirm !== true) {
+    errors.push(`Paso ${index + 1}: ${type} requiere confirm=true en modo laboratorio completo`);
   }
   if (type === 'USE_ACCOUNT' && !Number.isInteger(Number(step.account_id))) errors.push(`Paso ${index + 1}: USE_ACCOUNT requiere account_id explícito`);
   if (type === 'OPEN_APP' && !(step.package_name || step.packageName)) errors.push(`Paso ${index + 1}: OPEN_APP requiere package_name`);
@@ -276,6 +286,8 @@ module.exports = {
   configuredDeviceAllowlist,
   assertOperational,
   assertDeviceInScope,
+  isDeviceInScope,
+  labFullEnabled,
   assertDeviceAllowed,
   validateStep,
   validateWorkflowSteps,
