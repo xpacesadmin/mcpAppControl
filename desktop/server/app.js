@@ -11,6 +11,7 @@ const accounts = require('./accounts');
 const deviceAccounts = require('./device_accounts');
 const proxies = require('./proxies');
 const labControl = require('./lab_control');
+const antiIdle = require('./anti_idle');
 const proxyRoutes = require('./proxy_routes');
 const proxyOrchControl = require('./proxy_orch_control');
 const hermes = require('./hermes');
@@ -77,6 +78,7 @@ function createServer(db, routerPort, apiToken = '') {
     requestProviderRotation: input => proxyOrchControl.requestRotation(input),
   });
   deviceAccounts.init(db, { dispatchDevice: (serial, command, params) => logic.routerDispatch(serial, command, params) });
+  antiIdle.init(db, { dispatch: (serial, command, params) => logic.routerDispatch(serial, command, params) });
 
   const app = express();
   app.use(express.json({ limit: '50mb' }));
@@ -171,6 +173,26 @@ function createServer(db, routerPort, apiToken = '') {
       details: logic.safeJson(row.details, {}),
     }));
     res.json({ success: true, data: rows });
+  });
+
+  app.get('/api/v1/anti-idle', (req, res) => {
+    res.json({ success: true, data: antiIdle.state() });
+  });
+  app.put('/api/v1/anti-idle/config', (req, res) => {
+    try { res.json({ success: true, data: antiIdle.configure(req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.post('/api/v1/anti-idle/start', (req, res) => {
+    try { res.json({ success: true, data: antiIdle.start(req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.post('/api/v1/anti-idle/stop', (req, res) => {
+    try { res.json({ success: true, data: antiIdle.stop(req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.post('/api/v1/anti-idle/run-now', (req, res) => {
+    try { res.json({ success: true, data: antiIdle.runNow(req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
   });
 
   app.get('/api/v1/proxy-routes', (req, res) => {

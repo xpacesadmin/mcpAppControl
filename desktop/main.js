@@ -16,6 +16,7 @@ const hermes = require('./server/hermes');
 const settings = require('./server/settings');
 const views = require('./server/views');
 const labControl = require('./server/lab_control');
+const antiIdle = require('./server/anti_idle');
 const router = require('./router');
 const adb = require('./adb');
 const mirror = require('./adb/mirror');
@@ -41,6 +42,7 @@ app.setPath('userData', path.join(app.getPath('appData'), CARPETA_DATOS));
 let win = null;
 let apiToken = '';
 let scheduleInterval = null;
+let antiIdleInterval = null;
 let pruneInterval = null;
 let monitorInterval = null;
 let database = null;
@@ -212,6 +214,11 @@ app.whenReady().then(async () => {
       try { logic.scheduleTick(); } catch (e) { console.error('[scheduleTick]', e.message); }
     }, 30000);
 
+    // 4a. Anti-idle es opt-in, allowlist-only y nunca superpone ciclos.
+    antiIdleInterval = setInterval(() => {
+      antiIdle.tick().catch(e => console.error('[anti-idle]', e.message));
+    }, 5000);
+
     // 4b. Poda de logs antiguos (> 7 días): al arrancar y cada 6 horas, para que
     // la BD no crezca sin límite y cada guardado sea rápido.
     const prune = () => { try { const n = dbServer.pruneLogs(db, 7); if (n) console.log(`[prune] ${n} logs antiguos eliminados`); } catch (e) { console.error('[prune]', e.message); } };
@@ -286,6 +293,7 @@ app.on('window-all-closed', () => {
 
   safe('intervalos', () => {
     if (scheduleInterval) clearInterval(scheduleInterval);
+    if (antiIdleInterval) clearInterval(antiIdleInterval);
     if (pruneInterval) clearInterval(pruneInterval);
     if (monitorInterval) clearInterval(monitorInterval);
   });
@@ -293,6 +301,7 @@ app.on('window-all-closed', () => {
   safe('adb', () => adb.stop());
   safe('router', () => router.stop());
   safe('http', () => { if (httpServer) httpServer.close(); });
+  safe('anti-idle', () => antiIdle.shutdown());
   safe('db', () => { if (database) database.close(); });
 
   app.quit();

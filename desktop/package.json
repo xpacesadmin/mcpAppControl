@@ -7,7 +7,7 @@
   "author": "MCP AppControl",
   "scripts": {
     "start": "electron .",
-    "test": "node --test test/hermes.test.js test/lab-control.test.js test/maintenance.test.js test/proxies.test.js test/proxy-routes.test.js test/device-accounts.test.js test/server.test.js",
+    "test": "node --test test/hermes.test.js test/lab-control.test.js test/maintenance.test.js test/proxies.test.js test/proxy-routes.test.js test/device-accounts.test.js test/anti-idle.test.js test/server.test.js",
     "mcp:bundle": "npm --prefix ../mcp-server run bundle",
     "dist": "npm run mcp:bundle && electron-builder",
     "dist:unsigned": "npm run mcp:bundle && electron-builder --config.win.signAndEditExecutable=false"

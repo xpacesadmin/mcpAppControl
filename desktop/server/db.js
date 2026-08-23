@@ -295,6 +295,23 @@ CREATE TABLE IF NOT EXISTS proxy_route_assignments (
   FOREIGN KEY(device_id) REFERENCES devices(id)
 );
 
+CREATE TABLE IF NOT EXISTS anti_idle_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled INTEGER NOT NULL DEFAULT 0,
+  running INTEGER NOT NULL DEFAULT 0,
+  device_ids TEXT NOT NULL DEFAULT '[]',
+  package_names TEXT NOT NULL DEFAULT '[]',
+  interval_seconds INTEGER NOT NULL DEFAULT 480,
+  action_duration_seconds INTEGER NOT NULL DEFAULT 45,
+  gesture_interval_seconds INTEGER NOT NULL DEFAULT 4,
+  active_run_id TEXT,
+  last_run_at TEXT,
+  next_run_at TEXT,
+  last_result TEXT,
+  last_error TEXT,
+  updated_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS view_campaigns (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,

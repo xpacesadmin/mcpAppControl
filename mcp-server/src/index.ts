@@ -6,6 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import axios from "axios";
 import { readFileSync } from "node:fs";
+import { ANTI_IDLE_TOOLS } from "./anti-idle-tools.js";
 
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000/api/v1";
 const BACKEND_TOKEN = (() => {
@@ -188,6 +189,8 @@ const TOOLS = [
             required: ["reason", "confirm_resume", "idempotency_key"],
         },
     },
+
+    ...ANTI_IDLE_TOOLS,
 
     // Credential-free stable proxy routes
     {
@@ -912,6 +915,16 @@ async function callTool(name: string, params: any) {
             return apiPost("/lab/emergency-stop", params);
         case "resume_lab":
             return apiPost("/lab/resume", params);
+        case "anti_idle_status":
+            return apiGet("/anti-idle");
+        case "configure_anti_idle":
+            return apiPut("/anti-idle/config", params);
+        case "start_anti_idle":
+            return apiPost("/anti-idle/start", params);
+        case "stop_anti_idle":
+            return apiPost("/anti-idle/stop", params);
+        case "run_anti_idle_now":
+            return apiPost("/anti-idle/run-now", params);
         case "list_proxy_routes":
             return apiGet("/proxy-routes", params);
         case "inspect_proxy_route":

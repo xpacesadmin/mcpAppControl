@@ -219,6 +219,12 @@
                                 <button class="action-btn" style="background:#dc2626; color:#fff; font-weight:700;" onclick="triggerFleetEmergencyDisable()" title="Desactiva todo el tráfico de forwarding en menos de 10 segundos">🛡️ Desactivación Emergencia</button>
                                 <button class="action-btn blue" onclick="showFleetLanesModal()" title="Ver y gestionar las 6 rutas Proxy Orch (BASELINE-8001, STABLE-A..C, RES-ROTATE)">🔌 Proxy Orch Lanes</button>
                                 <button class="action-btn blue" onclick="showFleetVlanDevicesModal()" title="Ver dispositivos registrados en la VLAN 60 del piloto">📋 Registro VLAN 60</button>
+                                <div class="tm-sep">Anti-idle seguro</div>
+                                <div id="antiIdleStatus" style="grid-column:1/-1; font-size:12px; color:#94a3b8; padding:4px 0;">Consultando…</div>
+                                <button class="action-btn" style="background:#15803d; color:#fff; font-weight:700;" onclick="startAntiIdleMode()" title="Usa únicamente los dispositivos seleccionados y exige rutas proxy verificadas">▶ Activar anti-idle</button>
+                                <button class="action-btn blue" onclick="runAntiIdleNow()" title="Ejecuta ahora el ciclo configurado de 45 segundos">⚡ Ejecutar ahora</button>
+                                <button class="action-btn" style="grid-column:1/-1; background:#b91c1c; color:#fff; font-weight:700;" onclick="stopAntiIdleMode()">⏹ Detener anti-idle</button>
+                                <p class="sub-tab-hint">45 s de apertura y desplazamiento neutral; espera 8 min entre ciclos. No hace likes, follows, publicaciones ni cambios de cuenta.</p>
                             </div>
 
                             <!-- Conector Hermes visible como opción principal -->
@@ -410,6 +416,7 @@
     <script src="/dashboard/js/dashboard.js?v=20260725-v8"></script>
     <script src="/dashboard/js/scripts-ui.js?v=20260819-v4"></script>
     <script src="/dashboard/js/fleet-lab-controls.js?v=20260819-v2"></script>
+    <script src="/dashboard/js/anti-idle.js?v=20260823-v1"></script>
     <script src="/dashboard/js/routines.js?v=20260725-v8"></script>
     <script src="/dashboard/js/monitor-ui.js?v=20260725-v6"></script>
     <script src="/dashboard/js/views-ui.js?v=20260725-v7"></script>
