@@ -56,6 +56,7 @@ function publicState(row) {
     interval_seconds: Number(row.interval_seconds),
     action_duration_seconds: Number(row.action_duration_seconds),
     gesture_interval_seconds: Number(row.gesture_interval_seconds),
+    natural_scrolls_enabled: row.natural_scrolls_enabled !== 0,
     last_run_at: row.last_run_at || null,
     next_run_at: row.next_run_at || null,
     last_result: safeJson(row.last_result, null),
@@ -85,9 +86,9 @@ function timingOf(input = {}) {
   const duration = Number(input.action_duration_seconds ?? 45);
   const gesture = Number(input.gesture_interval_seconds ?? 4);
   if (!Number.isInteger(interval) || interval < 60 || interval > 3600) throw new Error('interval_seconds fuera de rango');
-  if (!Number.isInteger(duration) || duration < 10 || duration > 60) throw new Error('action_duration_seconds fuera de rango');
-  if (!Number.isInteger(gesture) || gesture < 2 || gesture > 10) throw new Error('gesture_interval_seconds fuera de rango');
-  return { interval, duration, gesture };
+  if (!Number.isInteger(duration) || duration < 10 || duration > 300) throw new Error('action_duration_seconds fuera de rango');
+  if (!Number.isInteger(gesture) || gesture < 2 || gesture > 15) throw new Error('gesture_interval_seconds fuera de rango');
+  return { interval, duration, gesture, naturalScrolls: input.natural_scrolls_enabled !== false };
 }
 function targets(deviceIds, requireOnline = true) {
   const ids = [...new Set((Array.isArray(deviceIds) ? deviceIds : []).map(Number))];
@@ -126,13 +127,15 @@ function configure(input = {}) {
   const packages = packagesOf(input.package_names || DEFAULT_PACKAGES);
   const timing = timingOf(input);
   DB.run(
-    `UPDATE anti_idle_state SET device_ids=?,package_names=?,interval_seconds=?,
-     action_duration_seconds=?,gesture_interval_seconds=?,last_error=NULL,updated_at=? WHERE id=1`,
-    [JSON.stringify(deviceIds), JSON.stringify(packages), timing.interval, timing.duration, timing.gesture, now()]
+    `UPDATE anti_idle_state SET device_ids=?,package_names=?,interval_seconds=?,action_duration_seconds=?,
+     gesture_interval_seconds=?,natural_scrolls_enabled=?,last_error=NULL,updated_at=? WHERE id=1`,
+    [JSON.stringify(deviceIds), JSON.stringify(packages), timing.interval, timing.duration,
+      timing.gesture, timing.naturalScrolls ? 1 : 0, now()]
   );
   labControl.audit('anti_idle.configure', 'ok', {
     device_ids: deviceIds, package_names: packages, interval_seconds: timing.interval,
     action_duration_seconds: timing.duration, gesture_interval_seconds: timing.gesture,
+    natural_scrolls_enabled: timing.naturalScrolls,
   }, input);
   return state();
 }
@@ -182,10 +185,12 @@ async function runDevice(device, config, runId) {
       opened && opened.success ? appSwitches++ : failures++;
       if (!active(runId)) { cancelled = true; break; }
     }
-    const scrolled = await DISPATCH(device.serial_number, 'SCROLL', { direction });
-    scrolled && scrolled.success ? gestures++ : failures++;
+    if (config.natural_scrolls_enabled) {
+      const scrolled = await DISPATCH(device.serial_number, 'SCROLL', { direction });
+      scrolled && scrolled.success ? gestures++ : failures++;
+      direction = direction === 'down' ? 'up' : 'down';
+    }
     actionIndex++;
-    direction = direction === 'down' ? 'up' : 'down';
     const remaining = end - CLOCK();
     if (remaining <= 0) break;
     if (!await wait(Math.min(config.gesture_interval_seconds * 1000, remaining), runId)) { cancelled = true; break; }

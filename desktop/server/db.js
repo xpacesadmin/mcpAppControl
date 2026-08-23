@@ -304,6 +304,7 @@ CREATE TABLE IF NOT EXISTS anti_idle_state (
   interval_seconds INTEGER NOT NULL DEFAULT 480,
   action_duration_seconds INTEGER NOT NULL DEFAULT 45,
   gesture_interval_seconds INTEGER NOT NULL DEFAULT 4,
+  natural_scrolls_enabled INTEGER NOT NULL DEFAULT 1,
   active_run_id TEXT,
   last_run_at TEXT,
   next_run_at TEXT,
@@ -546,6 +547,10 @@ const ACCOUNT_COLUMNS = {
   secret_ref: 'TEXT',
 };
 
+const ANTI_IDLE_COLUMNS = {
+  natural_scrolls_enabled: 'INTEGER NOT NULL DEFAULT 1',
+};
+
 function now() {
   return new Date().toISOString();
 }
@@ -648,6 +653,10 @@ function openNative(file) {
   for (const [name, def] of Object.entries(ACCOUNT_COLUMNS)) {
     if (!accountCols.has(name)) native.exec(`ALTER TABLE accounts ADD COLUMN ${name} ${def}`);
   }
+  const antiIdleCols = new Set(native.prepare('PRAGMA table_info(anti_idle_state)').all().map(c => c.name));
+  for (const [name, def] of Object.entries(ANTI_IDLE_COLUMNS)) {
+    if (!antiIdleCols.has(name)) native.exec(`ALTER TABLE anti_idle_state ADD COLUMN ${name} ${def}`);
+  }
   migrarNombresDeComando(sql => native.prepare(sql).run().changes);
   return {
     file, native, closed: false, engine: 'better-sqlite3',
@@ -697,6 +706,7 @@ async function openSqlJs(file = ':memory:') {
   native.run(SCHEMA);
   ensureColumns(native, 'devices', DEVICE_COLUMNS);
   ensureColumns(native, 'accounts', ACCOUNT_COLUMNS);
+  ensureColumns(native, 'anti_idle_state', ANTI_IDLE_COLUMNS);
   migrarNombresDeComando(sql => { native.run(sql); return native.getRowsModified(); });
 
   const db = {

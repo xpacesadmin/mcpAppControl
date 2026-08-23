@@ -70,6 +70,7 @@ test('anti-idle requires exact allowlisted devices with verified active routes',
   assert.equal(configured.interval_seconds, 480);
   assert.equal(configured.action_duration_seconds, 45);
   assert.equal(configured.gesture_interval_seconds, 4);
+  assert.equal(configured.natural_scrolls_enabled, true);
   assert.deepEqual(configured.device_ids, [1]);
 });
 
@@ -123,4 +124,26 @@ test('anti-idle runs a bounded neutral cycle and waits the configured interval',
   assert.equal(stopped.enabled, false);
   const replay = antiIdle.stop({ confirm: true, reason: 'test complete', idempotency_key: 'anti-stop-2' });
   assert.equal(replay.enabled, false);
+
+  commands.length = 0;
+  antiIdle.configure({
+    confirm: true,
+    device_ids: [1, 2],
+    package_names: ['com.android.settings', 'com.android.vending'],
+    interval_seconds: 60,
+    action_duration_seconds: 10,
+    gesture_interval_seconds: 2,
+    natural_scrolls_enabled: false,
+    idempotency_key: 'anti-config-3',
+  });
+  const noScrollState = antiIdle.state();
+  assert.equal(noScrollState.natural_scrolls_enabled, false);
+  antiIdle.start({ confirm: true, run_immediately: false, idempotency_key: 'anti-start-3' });
+  clock += 60000;
+  const noScrollRun = await antiIdle.tick();
+  assert.equal(noScrollRun.accepted, true);
+  assert.equal(noScrollRun.summary.gestures, 0);
+  assert.ok(noScrollRun.summary.app_switches > 0);
+  assert.deepEqual([...new Set(commands.map(item => item.command))], ['OPEN_APP']);
+  antiIdle.stop({ confirm: true, reason: 'no-scroll test complete', idempotency_key: 'anti-stop-3' });
 });
