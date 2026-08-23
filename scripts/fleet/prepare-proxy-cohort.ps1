@@ -141,9 +141,15 @@ switch ($Mode) {
         if ($current -and [string]$current.route_id -ne [string]$route.route_id) {
             throw "Device already has route $($current.route_id). Release it explicitly before changing routes."
         }
-        [void](Invoke-McpApi -Method POST -Path "/proxy-routes/$($route.route_id)/test" -Body @{
+        $probeResult = Invoke-McpApi -Method POST -Path "/proxy-routes/$($route.route_id)/test" -Body @{
             device_id=[int]$device.id; timeout_ms=10000; confirm=$true; idempotency_key="test-$($route.route_id)-$OperationId"
-        })
+        }
+        if (-not $probeResult.data.probe.reachable) {
+            throw "Pre-assignment route probe failed for $($route.route_id): $($probeResult.data.probe.error)"
+        }
+        if ([string]$probeResult.data.probe.observed_public_ip -ne [string]$route.expected_public_ip) {
+            throw "Pre-assignment route IP mismatch for $($route.route_id): expected $($route.expected_public_ip), observed $($probeResult.data.probe.observed_public_ip)"
+        }
         [void](Invoke-McpApi -Method POST -Path "/proxy-routes/$($route.route_id)/assign" -Body @{
             device_id=[int]$device.id; expected_previous_route_id=$(if($current){[string]$current.route_id}else{$null}); confirm=$true; idempotency_key="assign-$($route.route_id)-$OperationId"
         })
