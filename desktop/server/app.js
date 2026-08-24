@@ -1147,6 +1147,14 @@ function createServer(db, routerPort, apiToken = '') {
     const seriales = devs.map(d => d.serial_number);
     const marcasSerial = seriales.map(() => '?').join(',');
 
+    // Abort the in-memory automation before changing task records. Otherwise a
+    // warm-up sleeping inside the ADB module can wake later and resume tapping.
+    let abortadas = 0;
+    for (const d of devs) {
+      const serial = d.adb_serial || d.serial_number;
+      if (serial && adb.cancel) abortadas += adb.cancel(serial);
+    }
+
     const asignaciones = db.run(
       `UPDATE task_assignments SET status='cancelled', completed_at=?, updated_at=? WHERE status IN ('running','assigned') AND device_id IN (${marcas})`,
       [ts, ts, ...device_ids]).changes;
@@ -1169,8 +1177,8 @@ function createServer(db, routerPort, apiToken = '') {
 
     res.json({
       success: true,
-      message: `Detenidas ${tareas} tareas y ${asignaciones} asignaciones en ${devs.length} dispositivo(s); app cerrada en ${cerrados}`,
-      data: { tasks: tareas, assignments: asignaciones, devices: devs.length, force_stopped: cerrados },
+      message: `Detenidas ${tareas} tareas, ${asignaciones} asignaciones y ${abortadas} automatizaciones activas en ${devs.length} dispositivo(s); app cerrada en ${cerrados}`,
+      data: { tasks: tareas, assignments: asignaciones, active_automations: abortadas, devices: devs.length, force_stopped: cerrados },
     });
   });
 

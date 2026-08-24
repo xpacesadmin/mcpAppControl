@@ -96,6 +96,67 @@ function adbStats() { return { active: activeAdb, queued: adbQueue.length, max: 
 function shell(serial, cmd, opts) { return adb(['-s', serial, 'shell', ...cmd], opts); }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// Long-running app scripts execute inside this process. Closing the target app
+// alone is not enough to stop them: a warm-up can wake after its current sleep
+// and continue tapping. Keep abort controllers per ADB serial so Stop Task can
+// cancel only the selected device without disturbing the rest of the fleet.
+const activeScriptControllers = new Map();
+
+function cancelledError(serial) {
+  const error = new Error(`Automation cancelled for ${serial}`);
+  error.code = 'AUTOMATION_CANCELLED';
+  return error;
+}
+
+function createScriptContext(serial) {
+  const controller = new AbortController();
+  let controllers = activeScriptControllers.get(serial);
+  if (!controllers) {
+    controllers = new Set();
+    activeScriptControllers.set(serial, controllers);
+  }
+  controllers.add(controller);
+
+  const ensureActive = () => {
+    if (controller.signal.aborted) throw cancelledError(serial);
+  };
+  const cancellableSleep = ms => new Promise((resolve, reject) => {
+    ensureActive();
+    const timer = setTimeout(() => {
+      controller.signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, Math.max(0, Number(ms) || 0));
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(cancelledError(serial));
+    };
+    controller.signal.addEventListener('abort', onAbort, { once: true });
+  });
+  const cancellableShell = async (target, args, opts) => {
+    ensureActive();
+    const result = await shell(target, args, opts);
+    ensureActive();
+    return result;
+  };
+  const finish = () => {
+    controllers.delete(controller);
+    if (!controllers.size) activeScriptControllers.delete(serial);
+  };
+
+  return {
+    ctx: { shell: cancellableShell, adb, sleep: cancellableSleep, dumpUi, live, HJ, HD, CONFIG, execute },
+    finish,
+  };
+}
+
+function cancel(serial) {
+  const controllers = activeScriptControllers.get(String(serial || '').trim());
+  if (!controllers) return 0;
+  const count = controllers.size;
+  for (const controller of controllers) controller.abort();
+  return count;
+}
+
 async function backendPost(endpoint, data) {
   const headers = { 'Content-Type': 'application/json' };
   if (CONFIG.backendToken) headers['Authorization'] = `Bearer ${CONFIG.backendToken}`;
@@ -476,8 +537,6 @@ async function tapId(serial, id) {
 
 // Contexto que reutilizan las suites de scripts: misma cola de concurrencia ADB,
 // mismo jitter humano y mismo dump de UI que el resto del módulo.
-const SCRIPT_CTX = { shell, adb, sleep, dumpUi, live, HJ, HD, CONFIG, execute };
-
 async function execute(serial, command, params) {
   if (!isAllowedSerial(serial)) {
     return { success: false, message: `ADB serial fuera del alcance aprobado: ${serial}` };
@@ -495,26 +554,35 @@ async function execute(serial, command, params) {
   // Los scripts largos (warmup, campañas, boost lives…) viven en sus módulos:
   // son bucles con estado, no comandos de una línea como el resto del switch.
   if (tiktok.handles(command)) {
+    const script = createScriptContext(serial);
     try {
-      return await tiktok.run(SCRIPT_CTX, serial, command, p);
+      return await tiktok.run(script.ctx, serial, command, p);
     } catch (e) {
       return { success: false, message: `${command}: ${e.message}` };
+    } finally {
+      script.finish();
     }
   }
 
   if (spotify.handles(command)) {
+    const script = createScriptContext(serial);
     try {
-      return await spotify.run(SCRIPT_CTX, serial, command, p);
+      return await spotify.run(script.ctx, serial, command, p);
     } catch (e) {
       return { success: false, message: `${command}: ${e.message}` };
+    } finally {
+      script.finish();
     }
   }
 
   if (twitch.handles(command)) {
+    const script = createScriptContext(serial);
     try {
-      return await twitch.run(SCRIPT_CTX, serial, command, p);
+      return await twitch.run(script.ctx, serial, command, p);
     } catch (e) {
       return { success: false, message: `${command}: ${e.message}` };
+    } finally {
+      script.finish();
     }
   }
 
@@ -1727,6 +1795,11 @@ function start(config) {
   poll();
   pollTimer = setInterval(poll, 1500);
 }
-function stop() { if (pollTimer) clearInterval(pollTimer); }
+function stop() {
+  if (pollTimer) clearInterval(pollTimer);
+  for (const controllers of activeScriptControllers.values()) {
+    for (const controller of controllers) controller.abort();
+  }
+}
 
-module.exports = { start, stop, has, execute, captureFrame, connectTcp, scanRange, live, adbStats, resolveAdb };
+module.exports = { start, stop, has, execute, cancel, captureFrame, connectTcp, scanRange, live, adbStats, resolveAdb };
