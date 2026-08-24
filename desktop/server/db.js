@@ -195,6 +195,11 @@ CREATE TABLE IF NOT EXISTS accounts (
   active INTEGER DEFAULT 0,
   cooldown_until TEXT,
   last_used_at TEXT,
+  verification_state TEXT DEFAULT 'unknown',
+  last_verified_at TEXT,
+  last_seen_on_device_at TEXT,
+  last_verification_message TEXT,
+  consecutive_missing INTEGER DEFAULT 0,
   created_at TEXT,
   updated_at TEXT
 );
@@ -545,6 +550,11 @@ const DEVICE_COLUMNS = {
 
 const ACCOUNT_COLUMNS = {
   secret_ref: 'TEXT',
+  verification_state: "TEXT DEFAULT 'unknown'",
+  last_verified_at: 'TEXT',
+  last_seen_on_device_at: 'TEXT',
+  last_verification_message: 'TEXT',
+  consecutive_missing: 'INTEGER DEFAULT 0',
 };
 
 const ANTI_IDLE_COLUMNS = {

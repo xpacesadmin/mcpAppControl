@@ -2,6 +2,8 @@
 param(
     [ValidateSet('Validate','EnrollRoutes','AssignOne','VerifyOne','ReleaseOne')]
     [string]$Mode = 'Validate',
+    [ValidateSet(60,61)]
+    [int]$Vlan = 60,
     [int]$FleetNumber,
     [string]$ManifestPath = '',
     [string]$ApiBaseUrl = 'http://127.0.0.1:8733/api/v1',
@@ -12,7 +14,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-if (-not $ManifestPath) { $ManifestPath = Join-Path $PSScriptRoot '..\..\docs\proxy-routes\fleet60-cohort-20.plan.json' }
+if (-not $ManifestPath) {
+    $name = if ($Vlan -eq 60) { 'fleet60-cohort-20.plan.json' } else { 'fleet61-cohort-20.plan.json' }
+    $ManifestPath = Join-Path $PSScriptRoot "..\..\docs\proxy-routes\$name"
+}
 
 function Assert-Manifest {
     param([object]$Manifest)
@@ -39,13 +44,13 @@ function Assert-Manifest {
 
     $routeIds = @{}; $serials = @{}; $listeners = @{}; $providerPorts = @{}; $publicIps = @{}
     foreach ($route in $routes) {
-        if ([int]$route.assigned_fleet_vlan -ne 60) { throw "Route $($route.route_id) is outside VLAN 60" }
+        if ([int]$route.assigned_fleet_vlan -ne $Vlan) { throw "Route $($route.route_id) is outside VLAN $Vlan" }
         if ([string]$route.classification -ne 'dedicated_static') { throw "Route $($route.route_id) is not dedicated_static" }
         if ([string]$route.protocol -ne 'HTTP') { throw "Route $($route.route_id) must use HTTP for the current 3proxy chain" }
-        if ([string]$route.adb_serial -notmatch '^192\.168\.60\.\d{1,3}:5555$') { throw "Invalid ADB serial: $($route.adb_serial)" }
+        if ([string]$route.adb_serial -notmatch "^192\.168\.$Vlan\.\d{1,3}:5555$") { throw "Invalid ADB serial: $($route.adb_serial)" }
         if (([string]$route.adb_serial).Split(':')[0] -ne [string]$route.reserved_device_ip) { throw "ADB/reserved IP mismatch for $($route.route_id)" }
-        if ([int]$route.internal_endpoint.port -ne (8200 + [int]$route.fleet_number)) { throw "Unexpected listener for $($route.route_id)" }
-        if ([int]$route.provider_endpoint.port -ne (10000 + [int]$route.fleet_number)) { throw "Unexpected provider port for $($route.route_id)" }
+        if ($Vlan -eq 60 -and [int]$route.internal_endpoint.port -ne (8200 + [int]$route.fleet_number)) { throw "Unexpected VLAN 60 listener for $($route.route_id)" }
+        if ($Vlan -eq 60 -and [int]$route.provider_endpoint.port -ne (10000 + [int]$route.fleet_number)) { throw "Unexpected VLAN 60 provider port for $($route.route_id)" }
         foreach ($entry in @(
             @{ Set=$routeIds; Key=[string]$route.route_id; Label='route ID' },
             @{ Set=$serials; Key=[string]$route.adb_serial; Label='ADB serial' },
@@ -57,9 +62,11 @@ function Assert-Manifest {
             $entry.Set[$entry.Key] = $true
         }
     }
-    $fleet1 = $routes | Where-Object { [int]$_.fleet_number -eq 1 }
-    if ($fleet1.adb_serial -ne '192.168.60.199:5555' -or [int]$fleet1.internal_endpoint.port -ne 8201 -or $fleet1.expected_public_ip -ne '13.143.18.160') {
-        throw 'Fleet 1 canary mapping changed unexpectedly'
+    if ($Vlan -eq 60) {
+        $fleet1 = $routes | Where-Object { [int]$_.fleet_number -eq 1 }
+        if ($fleet1.adb_serial -ne '192.168.60.199:5555' -or [int]$fleet1.internal_endpoint.port -ne 8201 -or $fleet1.expected_public_ip -ne '13.143.18.160') {
+            throw 'Fleet 1 canary mapping changed unexpectedly'
+        }
     }
     return $routes
 }
@@ -101,7 +108,7 @@ $routes = @(Assert-Manifest $manifest)
 
 if ($Mode -eq 'Validate') {
     $routes | Select-Object fleet_number,route_id,adb_serial,@{n='listener';e={$_.internal_endpoint.port}},@{n='provider_port';e={$_.provider_endpoint.port}},expected_public_ip,rollout_state | Format-Table -AutoSize
-    Write-Host 'VALID: 20 exact VLAN 60 devices, 20 unique listeners, 20 unique dedicated IPs, 5 reserve lines.'
+    Write-Host "VALID: 20 exact VLAN $Vlan devices, 20 unique listeners, and 20 unique dedicated IPs."
     exit 0
 }
 
@@ -119,7 +126,7 @@ if ($Mode -eq 'EnrollRoutes') {
             country = [string]$route.location.country
             classification = [string]$route.classification
             expected_public_ip = [string]$route.expected_public_ip
-            assigned_fleet_vlan = 60
+            assigned_fleet_vlan = $Vlan
             confirm = $true
             idempotency_key = "enroll-$($route.route_id)-v1"
         }

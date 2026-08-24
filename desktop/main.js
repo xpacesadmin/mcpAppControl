@@ -11,6 +11,7 @@ const appServer = require('./server/app');
 const alerts = require('./server/alerts');
 const monitor = require('./server/monitor');
 const accounts = require('./server/accounts');
+const accountInventory = require('./server/account_inventory');
 const proxies = require('./server/proxies');
 const hermes = require('./server/hermes');
 const settings = require('./server/settings');
@@ -45,6 +46,7 @@ let scheduleInterval = null;
 let antiIdleInterval = null;
 let pruneInterval = null;
 let monitorInterval = null;
+let accountInventoryInterval = null;
 let database = null;
 let httpServer = null;
 
@@ -160,6 +162,11 @@ app.whenReady().then(async () => {
     logic.init(db, WS_PORT);
     alerts.init(db);
     accounts.init(db);
+    accountInventory.init(db, {
+      dispatch: logic.routerDispatch,
+      alerts,
+      labControl,
+    });
     proxies.init(db, {
       encrypt: accounts._enc,
       decrypt: accounts._dec,
@@ -249,6 +256,11 @@ app.whenReady().then(async () => {
       } catch (e) { console.error('[healthTick]', e.message); }
     }, 15000);
 
+    // Inventario de cuentas: sondeo ADB read-only, secuencial, allowlist-only.
+    accountInventoryInterval = setInterval(() => {
+      accountInventory.tick().catch(e => console.error('[account-inventory]', e.message));
+    }, 15000);
+
     // 5. Command Router: puente con agentes (WebSocket)
     const backendApi = `http://127.0.0.1:${HTTP_PORT}/api/v1`;
     router.start({
@@ -296,12 +308,14 @@ app.on('window-all-closed', () => {
     if (antiIdleInterval) clearInterval(antiIdleInterval);
     if (pruneInterval) clearInterval(pruneInterval);
     if (monitorInterval) clearInterval(monitorInterval);
+    if (accountInventoryInterval) clearInterval(accountInventoryInterval);
   });
   safe('espejo', () => mirror.stopAll());
   safe('adb', () => adb.stop());
   safe('router', () => router.stop());
   safe('http', () => { if (httpServer) httpServer.close(); });
   safe('anti-idle', () => antiIdle.shutdown());
+  safe('account-inventory', () => accountInventory.shutdown());
   safe('db', () => { if (database) database.close(); });
 
   app.quit();

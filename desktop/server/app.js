@@ -8,6 +8,7 @@ const adb = require('../adb');
 const alerts = require('./alerts');
 const monitor = require('./monitor');
 const accounts = require('./accounts');
+const accountInventory = require('./account_inventory');
 const deviceAccounts = require('./device_accounts');
 const proxies = require('./proxies');
 const labControl = require('./lab_control');
@@ -127,8 +128,10 @@ function createServer(db, routerPort, apiToken = '') {
       req.path.startsWith('/api/v1/proxies/') ||
       /^\/api\/v1\/devices\/[^/]+\/proxy(?:\/|$)/.test(req.path)
     );
+    const fullAllowlist = control.lab_full_enabled && control.lab_scope === 'allowlist';
     const legacyAccountAccess = req.path.startsWith('/api/v1/accounts') &&
-      (write || req.path.endsWith('/totp'));
+      (write || req.path.endsWith('/totp')) &&
+      !fullAllowlist;
     const blocked = legacyProxyWrite ||
       legacyAccountAccess ||
       (write && req.path.startsWith('/api/v1/schedules')) ||
@@ -1450,6 +1453,62 @@ function createServer(db, routerPort, apiToken = '') {
     const { platform, status, device_id } = req.query;
     res.json({ success: true, data: accounts.list({ platform, status, device_id: device_id != null ? Number(device_id) : undefined }) });
   });
+  app.get('/api/v1/accounts/inventory', (req, res) => {
+    res.json({ success: true, data: accountInventory.inventory(req.query.platform || 'com.google') });
+  });
+  app.get('/api/v1/accounts/inventory/monitor', (req, res) => {
+    res.json({ success: true, data: accountInventory.getConfig() });
+  });
+  app.put('/api/v1/accounts/inventory/monitor', (req, res) => {
+    res.json({ success: true, data: accountInventory.setConfig(req.body || {}), message: 'Account inventory monitor updated' });
+  });
+  // Importa inventario por serial ADB exacto. No depende del orden visual.
+  app.post('/api/v1/accounts/import-assignments', (req, res) => {
+    const rows = Array.isArray(req.body) ? req.body : (req.body && req.body.assignments);
+    if (!Array.isArray(rows) || !rows.length) {
+      return res.status(422).json({ success: false, message: 'assignments es requerido' });
+    }
+    const emails = new Set();
+    const serials = new Set();
+    const prepared = [];
+    for (const input of rows) {
+      const email = String(input && input.email || '').trim().toLowerCase();
+      const adbSerial = String(input && input.adb_serial || '').trim();
+      const platform = String(input && input.platform || 'com.google').trim();
+      const vlan = Number(input && input.vlan);
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(422).json({ success: false, message: 'Inventario contiene un correo inválido' });
+      }
+      if (!/^192\.168\.(60|61)\.\d{1,3}:5555$/.test(adbSerial)) {
+        return res.status(422).json({ success: false, message: 'Inventario contiene un serial ADB inválido' });
+      }
+      if (![60, 61].includes(vlan) || !adbSerial.startsWith(`192.168.${vlan}.`)) {
+        return res.status(422).json({ success: false, message: 'VLAN y serial ADB no coinciden' });
+      }
+      if (emails.has(email) || serials.has(adbSerial)) {
+        return res.status(422).json({ success: false, message: 'Inventario contiene correos o dispositivos duplicados' });
+      }
+      const device = db.get('SELECT * FROM devices WHERE adb_serial=? OR serial_number=?', [adbSerial, adbSerial]);
+      if (!device) return res.status(422).json({ success: false, message: `Dispositivo no registrado: ${adbSerial}` });
+      try { labControl.assertDeviceAllowed(device.id); }
+      catch (error) { return res.status(423).json({ success: false, message: error.message }); }
+      emails.add(email); serials.add(adbSerial);
+      prepared.push({ input, email, adbSerial, platform, vlan, device });
+    }
+    const imported = prepared.map(row => accounts.upsertAssignment({
+      email: row.email,
+      username: row.email,
+      platform: row.platform,
+      notes: `${String(row.input.fleet_label || '').trim()} VLAN${row.vlan}`.trim(),
+      status: 'active',
+    }, row.device.id));
+    labControl.audit('account_inventory.import_assignments', 'ok', {
+      imported_count: imported.length,
+      vlan_counts: prepared.reduce((out, row) => { out[row.vlan] = (out[row.vlan] || 0) + 1; return out; }, {}),
+      identifiers_exposed: false,
+    });
+    res.json({ success: true, data: { imported: imported.length }, message: `${imported.length} account assignments imported` });
+  });
   app.post('/api/v1/accounts', (req, res) => {
     if (!req.body || (!req.body.username && !req.body.email)) return res.status(422).json({ success: false, message: 'username o email requerido' });
     res.status(201).json({ success: true, data: accounts.create(req.body), message: 'Cuenta creada' });
@@ -1469,6 +1528,8 @@ function createServer(db, routerPort, apiToken = '') {
   app.post('/api/v1/accounts/:id/assign', (req, res) => {
     const { device_id } = req.body || {};
     if (device_id == null) return res.status(422).json({ success: false, message: 'device_id requerido' });
+    try { labControl.assertDeviceAllowed(Number(device_id)); }
+    catch (error) { return res.status(423).json({ success: false, message: error.message }); }
     const a = accounts.assign(Number(req.params.id), Number(device_id));
     if (!a) return res.status(404).json({ success: false, message: 'Cuenta no encontrada' });
     res.json({ success: true, data: a, message: 'Cuenta asignada' });
@@ -1491,6 +1552,10 @@ function createServer(db, routerPort, apiToken = '') {
     const unknown = device_ids.map(Number).filter(id => !known.has(id));
     if (unknown.length) {
       return res.status(422).json({ success: false, message: `Dispositivos inexistentes: ${unknown.join(', ')}` });
+    }
+    try { device_ids.map(Number).forEach(id => labControl.assertDeviceAllowed(id)); }
+    catch (error) {
+      return res.status(423).json({ success: false, message: error.message });
     }
     const data = accounts.distribute({ entries, deviceIds: device_ids.map(Number), platform });
     res.json({
@@ -1515,48 +1580,11 @@ function createServer(db, routerPort, apiToken = '') {
   });
 
   // ---------- Verificación de cuentas reales en el teléfono ----------
-  app.post('/api/v1/devices/:id/verify-accounts', async (req, res) => {
-    const dev = db.get('SELECT * FROM devices WHERE id = ? OR serial_number = ?', [req.params.id, req.params.id]);
-    if (!dev) return res.status(404).json({ success: false, message: 'Dispositivo no encontrado' });
-    if (!dev.adb_serial || !adb.has || !adb.has(dev.adb_serial)) {
-      return res.status(409).json({ success: false, message: 'No conectado por ADB' });
-    }
-    const r = await adb.execute(dev.adb_serial, 'CHECK_ACCOUNTS', {});
-    if (!r.success) return res.status(502).json({ success: false, message: r.message });
-
-    // Contrastar con cuentas asignadas en la BD para esta plataforma
-    const platform = (req.body || {}).platform || 'com.google';
-    const assigned = accounts.list({ device_id: dev.id, platform });
-    const assignedEmails = new Set(assigned.map(a => a.email || '').filter(Boolean));
-
-    const realEmails = new Set();
-    const realByType = r.data?.by_type || {};
-    const realList = [];
-    for (const [type, accs] of Object.entries(realByType)) {
-      for (const acc of accs) {
-        realEmails.add(acc.email);
-        realList.push({ email: acc.email, type, assigned: assignedEmails.has(acc.email) });
-      }
-    }
-
-    const mismatched = realList.filter(a => a.assigned && !realEmails.has(a.email));
-    const missing = assigned.filter(a => !realEmails.has(a.email || ''));
-
-    res.json({
-      success: true,
-      data: {
-        device_id: dev.id,
-        device_serial: dev.serial_number,
-        platform,
-        real_accounts: realList,
-        total_real: realList.length,
-        assigned_accounts: assigned.map(a => ({ email: a.email, platform: a.platform })),
-        total_assigned: assigned.length,
-        mismatched,
-        missing_from_device: missing.map(a => a.email),
-      },
-      message: `${realList.length} cuentas reales vs ${assigned.length} asignadas`,
-    });
+  app.post('/api/v1/devices/:id/verify-accounts', async (req, res, next) => {
+    try {
+      const data = await accountInventory.verifyDevice(req.params.id, { platform: (req.body || {}).platform || 'com.google', source: 'manual' });
+      res.json({ success: data.success, data, message: `${data.present_count}/${data.assigned_count} assigned accounts present` });
+    } catch (error) { next(error); }
   });
 
   // ---------- Asistente de alta: abrir pantalla y escribir email ----------
@@ -1574,64 +1602,11 @@ function createServer(db, routerPort, apiToken = '') {
   });
 
   // ---------- Verificar cuentas en TODOS los dispositivos ----------
-  app.post('/api/v1/accounts/verify-all', async (req, res) => {
-    const platform = (req.body || {}).platform || 'com.google';
-    const devices = db.all("SELECT * FROM devices WHERE status IN ('online','busy') AND adb_serial IS NOT NULL");
-    const results = [];
-
-    for (const dev of devices) {
-      try {
-        const r = await adb.execute(dev.adb_serial, 'CHECK_ACCOUNTS', {});
-        const assigned = accounts.list({ device_id: dev.id, platform });
-        const assignedEmails = new Set(assigned.map(a => a.email || '').filter(Boolean));
-
-        const realList = [];
-        const realEmails = new Set();
-        if (r.success && r.data?.by_type) {
-          for (const [type, accs] of Object.entries(r.data.by_type)) {
-            for (const acc of accs) {
-              realEmails.add(acc.email);
-              realList.push({ email: acc.email, type, assigned: assignedEmails.has(acc.email) });
-            }
-          }
-        }
-
-        const missing = assigned.filter(a => !realEmails.has(a.email || ''));
-
-        results.push({
-          device_id: dev.id,
-          device_name: dev.name || dev.serial_number,
-          serial: dev.serial_number,
-          success: r.success,
-          message: r.message,
-          real_count: realList.length,
-          assigned_count: assigned.length,
-          missing_from_device: missing.map(a => a.email),
-          mismatched: realList.filter(a => a.assigned && !realEmails.has(a.email)),
-        });
-      } catch (e) {
-        results.push({
-          device_id: dev.id,
-          device_name: dev.name || dev.serial_number,
-          serial: dev.serial_number,
-          success: false,
-          message: e.message,
-          real_count: 0,
-          assigned_count: 0,
-          missing_from_device: [],
-        });
-      }
-    }
-
-    const totalReal = results.reduce((s, r) => s + r.real_count, 0);
-    const totalAssigned = results.reduce((s, r) => s + r.assigned_count, 0);
-    const totalMissing = results.reduce((s, r) => s + r.missing_from_device.length, 0);
-
-    res.json({
-      success: true,
-      data: { results, summary: { total_real, total_assigned, total_missing, devices_checked: results.length } },
-      message: `Verificado en ${results.length} dispositivos: ${totalReal} reales vs ${totalAssigned} asignadas, ${totalMissing} sin encontrar`,
-    });
+  app.post('/api/v1/accounts/verify-all', async (req, res, next) => {
+    try {
+      const data = await accountInventory.verifyAll({ platform: (req.body || {}).platform || 'com.google', source: 'manual' });
+      res.json({ success: true, data, message: `Checked ${data.summary.devices_checked} devices; ${data.summary.total_missing} assigned accounts missing` });
+    } catch (error) { next(error); }
   });
 
   app.post('/api/v1/devices/:id/rotate-account', (req, res) => {

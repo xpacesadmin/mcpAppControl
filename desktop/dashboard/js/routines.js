@@ -551,9 +551,10 @@
     if (!cacheAccounts.length) { box.innerHTML = '<p class="rt-empty">Sin cuentas. Crea o importa.</p>'; return; }
     box.innerHTML = cacheAccounts.map(a => {
       const dev = cacheDevices.find(d => d.id === a.device_id);
+      const verify = { present: '✅ presente', missing: '🚨 ausente', unreachable: '⚠ no alcanzable', unknown: '○ sin verificar' }[a.verification_state || 'unknown'];
       return `<div class="rt-list-item ${editingAccountId === a.id ? 'active' : ''}" onclick="rtEditAccount(${a.id})">
         <div class="rt-item-name">${esc(a.username || a.email || 'cuenta')} <span class="acc-badge s-${esc(a.status)}">${esc(STATUS_LABEL[a.status] || a.status)}</span></div>
-        <div class="rt-item-sub">${esc(a.platform || 'sin plataforma')}${dev ? ' · 📱 ' + esc(dev.name || dev.serial_number) : ''}${a.active ? ' · <b>en uso</b>' : ''}</div>
+        <div class="rt-item-sub">${esc(a.platform || 'sin plataforma')}${dev ? ' · 📱 ' + esc(dev.name || dev.serial_number) : ''}${a.active ? ' · <b>en uso</b>' : ''} · ${verify}</div>
       </div>`;
     }).join('');
   }
@@ -642,6 +643,7 @@
         ${editingAccountId ? `<button class="rt-btn danger" onclick="rtDeleteAccount()">🗑️ Borrar</button>` : ''}
         <button class="rt-btn primary" onclick="rtSaveAccount()">💾 Guardar cuenta</button>
       </div>
+      <div class="rt-hint" style="margin-top:8px">Login: <b>${esc(a.verification_state || 'unknown')}</b>${a.last_verified_at ? ' · verificado ' + esc(new Date(a.last_verified_at).toLocaleString()) : ''}</div>
       <div class="rt-hint" style="margin-top:8px">En una rutina de login usa <code>{{account.username}}</code>, <code>{{account.password}}</code>, <code>{{account.email}}</code> o <code>{{account.totp}}</code> en los pasos "Escribir en campo"/"Teclear texto"; se sustituyen por la cuenta activa de cada dispositivo.</div>
       <div id="rtAccMsg" class="rt-msg"></div>`;
   }

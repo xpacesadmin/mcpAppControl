@@ -1102,17 +1102,64 @@ function openAccountVerifyModal() {
         <label>Plataforma
           <input id="verifyPlatform" type="text" value="com.google" placeholder="com.google, com.tiktok, com.instagram…">
         </label>
+        <div class="mail-row">
+          <label class="mail-dev"><input id="accountMonitorEnabled" type="checkbox"> Verificación automática</label>
+          <label>Intervalo (min) <input id="accountMonitorMinutes" type="number" min="1" max="1440" value="5" style="width:80px"></label>
+          <button class="btn-secondary" onclick="saveAccountMonitor()">Guardar</button>
+        </div>
+        <div id="accountInventorySummary" class="mail-preview">Cargando inventario…</div>
 
         <div class="apps-dir-actions">
           <button class="btn-secondary" onclick="verifySingleAccount()">Verificar un teléfono</button>
           <button class="btn-primary" onclick="verifyAllAccounts()">Verificar todos</button>
         </div>
+        <div id="verifyResult" class="mail-preview"></div>
 
         <div class="proxy-modal-actions">
           <button class="btn-secondary" onclick="document.getElementById('accountVerifyModal').remove()">Cerrar</button>
         </div>
       </div>`;
     document.body.appendChild(overlay);
+    refreshAccountInventoryPanel();
+}
+
+async function refreshAccountInventoryPanel() {
+    try {
+        const platform = document.getElementById('verifyPlatform')?.value.trim() || 'com.google';
+        const responses = await Promise.all([
+            apiFetch('/accounts/inventory/monitor'),
+            apiFetch('/accounts/inventory?platform=' + encodeURIComponent(platform)),
+        ]);
+        const cfg = responses[0].data || {};
+        const inventory = responses[1].data || [];
+        const enabled = document.getElementById('accountMonitorEnabled');
+        const minutes = document.getElementById('accountMonitorMinutes');
+        if (enabled) enabled.checked = cfg.enabled !== false;
+        if (minutes) minutes.value = Math.max(1, Math.round(Number(cfg.interval_sec || 300) / 60));
+        const counts = inventory.reduce((out, row) => {
+            const state = row.verification_state || 'unknown';
+            out[state] = (out[state] || 0) + 1;
+            return out;
+        }, {});
+        const box = document.getElementById('accountInventorySummary');
+        if (box) box.innerHTML =
+            '<div class="mail-row"><span class="mail-dev">Asignadas</span><code>' + inventory.length + '</code></div>' +
+            '<div class="mail-row"><span class="mail-dev">Presentes</span><code style="color:#22c55e">' + (counts.present || 0) + '</code></div>' +
+            '<div class="mail-row"><span class="mail-dev">Ausentes</span><code style="color:#ef4444">' + (counts.missing || 0) + '</code></div>' +
+            '<div class="mail-row"><span class="mail-dev">No alcanzables</span><code style="color:#f59e0b">' + (counts.unreachable || 0) + '</code></div>' +
+            '<div class="mail-row"><span class="mail-dev">Sin verificar</span><code>' + (counts.unknown || 0) + '</code></div>';
+    } catch (error) { setMailStatus('Error cargando inventario: ' + error.message, true); }
+}
+
+async function saveAccountMonitor() {
+    const enabled = !!document.getElementById('accountMonitorEnabled')?.checked;
+    const minutes = Math.max(1, Number(document.getElementById('accountMonitorMinutes')?.value || 5));
+    const platform = document.getElementById('verifyPlatform')?.value.trim() || 'com.google';
+    try {
+        await apiFetch('/accounts/inventory/monitor', { method: 'PUT', body: JSON.stringify({ enabled, interval_sec: minutes * 60, platform }) });
+        setMailStatus('Monitor de cuentas ' + (enabled ? 'activo' : 'desactivado') + ' · cada ' + minutes + ' min');
+        await refreshAccountInventoryPanel();
+    } catch (error) { setMailStatus('Error: ' + error.message, true); }
 }
 
 async function verifySingleAccount() {
@@ -1131,6 +1178,7 @@ async function verifySingleAccount() {
             body: JSON.stringify({ platform }),
         });
         showAccountVerifyResult(r.data);
+        await refreshAccountInventoryPanel();
     } catch (e) {
         setMailStatus(`Error: ${e.message}`, true);
     }
@@ -1146,6 +1194,7 @@ async function verifyAllAccounts() {
             body: JSON.stringify({ platform }),
         });
         showAccountVerifyResult(r.data);
+        await refreshAccountInventoryPanel();
     } catch (e) {
         setMailStatus(`Error: ${e.message}`, true);
     }

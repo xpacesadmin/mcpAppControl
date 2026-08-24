@@ -92,8 +92,10 @@ function timingOf(input = {}) {
 }
 function targets(deviceIds, requireOnline = true) {
   const ids = [...new Set((Array.isArray(deviceIds) ? deviceIds : []).map(Number))];
-  if (!ids.length || ids.length > 20 || ids.some(id => !Number.isInteger(id) || id <= 0)) {
-    throw new Error('Se requieren entre 1 y 20 device_ids explícitos');
+  const control = labControl.state();
+  const maximum = control.lab_mode_enabled ? Math.max(1, control.allowlisted_device_count) : 200;
+  if (!ids.length || ids.length > maximum || ids.some(id => !Number.isInteger(id) || id <= 0)) {
+    throw new Error(`Se requieren entre 1 y ${maximum} device_ids explícitos`);
   }
   labControl.assertOperational();
   ids.forEach(id => labControl.assertDeviceAllowed(id));

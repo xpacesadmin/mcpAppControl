@@ -71,6 +71,11 @@ function publicView(a) {
     has_password: !!a.password_enc, has_totp: !!a.totp_enc,
     has_secret_ref: !!a.secret_ref,
     cooldown_until: a.cooldown_until, last_used_at: a.last_used_at,
+    verification_state: a.verification_state || 'unknown',
+    last_verified_at: a.last_verified_at || null,
+    last_seen_on_device_at: a.last_seen_on_device_at || null,
+    last_verification_message: a.last_verification_message || null,
+    consecutive_missing: Number(a.consecutive_missing || 0),
     created_at: a.created_at, updated_at: a.updated_at,
   };
 }
@@ -105,6 +110,38 @@ function importBulk(rows) {
   let n = 0;
   for (const d of rows || []) { if (d && (d.username || d.email)) { create(d); n++; } }
   return n;
+}
+
+// Importación idempotente para inventarios operativos. Un correo/plataforma ya
+// conocido se reutiliza y se asigna por ID de dispositivo; nunca por posición.
+function upsertAssignment(d, deviceId) {
+  const email = String(d && d.email || '').trim().toLowerCase();
+  const platform = String(d && d.platform || 'com.google').trim() || 'com.google';
+  if (!email) throw new Error('email requerido');
+  const row = DB.get(
+    "SELECT * FROM accounts WHERE lower(email)=? AND COALESCE(platform,'')=? LIMIT 1",
+    [email, platform]
+  );
+  let accountId;
+  if (row) {
+    accountId = row.id;
+    update(accountId, {
+      username: d.username || email,
+      email,
+      platform,
+      notes: d.notes === undefined ? row.notes : d.notes,
+      status: d.status || (row.status === 'unused' ? 'active' : row.status),
+    });
+  } else {
+    accountId = create({
+      platform,
+      username: d.username || email,
+      email,
+      notes: d.notes || null,
+      status: d.status || 'active',
+    }).id;
+  }
+  return assign(accountId, Number(deviceId));
 }
 
 // ---------- asignación / rotación ----------
@@ -215,4 +252,4 @@ function resolveVars(device, step) {
   return out;
 }
 
-module.exports = { init, list, create, update, remove, importBulk, assign, unassign, distribute, setStatus, activeFor, rotate, resolveVars, totp, publicView, _enc: enc, _dec: dec };
+module.exports = { init, list, create, update, remove, importBulk, upsertAssignment, assign, unassign, distribute, setStatus, activeFor, rotate, resolveVars, totp, publicView, _enc: enc, _dec: dec };
