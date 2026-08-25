@@ -451,10 +451,27 @@
       if (!selectedIds.length) throw new Error('Selecciona explícitamente uno o más dispositivos.');
       const runParams = {};
       for (const param of cleanParameters()) {
-        const answer = prompt(param.label || param.name, param.default ?? '');
+        const bounds = param.type === 'number' && (param.min != null || param.max != null)
+          ? ` Rango: ${param.min ?? 'sin mínimo'}–${param.max ?? 'sin máximo'}.`
+          : '';
+        const answer = await customPrompt(
+          param.label || param.name,
+          `Valor para ejecutar esta rutina.${bounds}`,
+          String(param.default ?? ''),
+          param.type === 'number' ? 'Número' : '',
+        );
         if (answer === null) throw new Error('Ejecución cancelada por el operador.');
-        if (param.required && answer.trim() === '') throw new Error(`${param.label || param.name} es obligatorio.`);
-        runParams[param.name] = param.type === 'number' ? Number(answer) : (param.type === 'boolean' ? /^(1|true|yes|sí|si)$/i.test(answer) : answer);
+        const text = String(answer);
+        if (param.required && text.trim() === '') throw new Error(`${param.label || param.name} es obligatorio.`);
+        if (param.type === 'number') {
+          const numeric = Number(text);
+          if (!Number.isFinite(numeric)) throw new Error(`${param.label || param.name} debe ser numérico.`);
+          if (param.min != null && numeric < Number(param.min)) throw new Error(`${param.label || param.name} debe ser al menos ${param.min}.`);
+          if (param.max != null && numeric > Number(param.max)) throw new Error(`${param.label || param.name} debe ser como máximo ${param.max}.`);
+          runParams[param.name] = numeric;
+        } else {
+          runParams[param.name] = param.type === 'boolean' ? /^(1|true|yes|sí|si)$/i.test(text) : text;
+        }
       }
       const body = { device_ids: selectedIds, params: runParams };
       const r = await apiFetch('/workflows/' + editingWorkflowId + '/execute', { method: 'POST', body: JSON.stringify(body) });

@@ -80,3 +80,8 @@ test('routine-safe cross-app steps validate with bounded values', async t => {
 
   assert.equal(validation.valid, true, validation.errors.join('; '));
 });
+test('routine execution uses the in-app dialog instead of unsupported window.prompt', () => {
+  const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'dashboard', 'js', 'routines.js'), 'utf8');
+  assert.doesNotMatch(source, /\bprompt\s*\(/);
+  assert.match(source, /await customPrompt\s*\(/);
+});
