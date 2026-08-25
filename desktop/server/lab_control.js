@@ -23,6 +23,11 @@ const SAFE_LAB_STEPS = new Set([
   'WAIT',
   'TYPING_DELAY',
   'REPORT_RESULT',
+  'OPEN_WEB_SEARCH',
+  'CAPTURE_FOREGROUND_APP',
+  'RESTORE_FOREGROUND_APP',
+  'REPEAT_SCROLL',
+  'CLICK_FIRST_ACTIONABLE',
 ]);
 
 function labFullEnabled() {
@@ -208,6 +213,10 @@ function assertDeviceAllowed(deviceId) {
   return assertDeviceInScope(deviceId);
 }
 
+function isRoutineParamRef(value) {
+  return /^\{\{(?:params\.)?[A-Za-z][A-Za-z0-9_]*\}\}$/.test(String(value ?? ''));
+}
+
 function validateStep(step, index = 0) {
   const errors = [];
   if (!step || typeof step !== 'object' || Array.isArray(step)) return [`Paso ${index + 1}: objeto requerido`];
@@ -226,7 +235,16 @@ function validateStep(step, index = 0) {
   if (type === 'SET_TEXT' && !(step.resource_id || step.resourceId)) errors.push(`Paso ${index + 1}: SET_TEXT requiere resource_id`);
   if (type === 'WAIT' || type === 'TYPING_DELAY') {
     const duration = Number(step.duration ?? 1000);
-    if (!Number.isFinite(duration) || duration < 0 || duration > 30000) errors.push(`Paso ${index + 1}: duration debe estar entre 0 y 30000 ms`);
+    if (!isRoutineParamRef(step.duration) && (!Number.isFinite(duration) || duration < 0 || duration > 600000)) errors.push(`Paso ${index + 1}: duration debe estar entre 0 y 600000 ms`);
+  }
+  if (type === 'PLAY_MEDIA') {
+    const duration = Number(step.duration_seconds ?? step.durationSeconds ?? 30);
+    if (!isRoutineParamRef(step.duration_seconds ?? step.durationSeconds) && (!Number.isFinite(duration) || duration < 0 || duration > 600)) errors.push(`Paso ${index + 1}: duration_seconds debe estar entre 0 y 600`);
+  }
+  if (type === 'OPEN_WEB_SEARCH' && !String(step.query || '').trim()) errors.push(`Paso ${index + 1}: query requerido`);
+  if (type === 'REPEAT_SCROLL') {
+    const count = Number(step.count ?? 1);
+    if (!isRoutineParamRef(step.count) && (!Number.isFinite(count) || count < 1 || count > 50)) errors.push(`Paso ${index + 1}: count debe estar entre 1 y 50`);
   }
   if (step.timeout_ms != null && Number(step.timeout_ms) > 30000) errors.push(`Paso ${index + 1}: timeout_ms máximo 30000`);
   for (const [key, value] of Object.entries(step)) {

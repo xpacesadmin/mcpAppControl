@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS workflows (
   description TEXT,
   steps TEXT,
   allowed_package TEXT,
+  parameter_schema TEXT DEFAULT '[]',
   status TEXT DEFAULT 'draft',
   created_by INTEGER,
   created_at TEXT,
@@ -561,6 +562,10 @@ const ANTI_IDLE_COLUMNS = {
   natural_scrolls_enabled: 'INTEGER NOT NULL DEFAULT 1',
 };
 
+const WORKFLOW_COLUMNS = {
+  parameter_schema: "TEXT DEFAULT '[]'",
+};
+
 function now() {
   return new Date().toISOString();
 }
@@ -667,6 +672,10 @@ function openNative(file) {
   for (const [name, def] of Object.entries(ANTI_IDLE_COLUMNS)) {
     if (!antiIdleCols.has(name)) native.exec(`ALTER TABLE anti_idle_state ADD COLUMN ${name} ${def}`);
   }
+const workflowCols = new Set(native.prepare('PRAGMA table_info(workflows)').all().map(c => c.name));
+  for (const [name, def] of Object.entries(WORKFLOW_COLUMNS)) {
+    if (!workflowCols.has(name)) native.exec(`ALTER TABLE workflows ADD COLUMN ${name} ${def}`);
+  }
   migrarNombresDeComando(sql => native.prepare(sql).run().changes);
   return {
     file, native, closed: false, engine: 'better-sqlite3',
@@ -717,6 +726,7 @@ async function openSqlJs(file = ':memory:') {
   ensureColumns(native, 'devices', DEVICE_COLUMNS);
   ensureColumns(native, 'accounts', ACCOUNT_COLUMNS);
   ensureColumns(native, 'anti_idle_state', ANTI_IDLE_COLUMNS);
+  ensureColumns(native, 'workflows', WORKFLOW_COLUMNS);
   migrarNombresDeComando(sql => { native.run(sql); return native.getRowsModified(); });
 
   const db = {

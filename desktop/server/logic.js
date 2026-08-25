@@ -14,6 +14,73 @@ function init(db, routerPort) { DB = db; ROUTER_PORT = routerPort; labControl.in
 const sleep = ms => new Promise(r => setTimeout(r, Math.min(ms, 120000)));
 const uuid = () => crypto.randomUUID();
 
+function taskStopReason(taskId) {
+  if (!taskId || !DB) return null;
+  const task = DB.get('SELECT status FROM tasks WHERE id=?', [taskId]);
+  const control = labControl.state();
+  if (control.halted) return control.halt_reason || 'Emergency stop';
+  if (!task || ['cancel_requested', 'cancelled'].includes(task.status)) return 'Cancellation requested';
+  return null;
+}
+
+async function cancellableDelay(taskId, durationMs) {
+  let remaining = Math.max(0, Number(durationMs) || 0);
+  while (remaining > 0) {
+    const reason = taskStopReason(taskId);
+    if (reason) return { success: false, cancelled: true, message: reason, data: null };
+    const chunk = Math.min(remaining, 500);
+    await sleep(chunk);
+    remaining -= chunk;
+  }
+  const reason = taskStopReason(taskId);
+  return reason
+    ? { success: false, cancelled: true, message: reason, data: null }
+    : { success: true, message: 'Wait completed', data: null };
+}
+
+function resolveRoutineVars(value, params = {}) {
+  if (Array.isArray(value)) return value.map(item => resolveRoutineVars(item, params));
+  if (value && typeof value === 'object') {
+    const output = {};
+    for (const [key, child] of Object.entries(value)) output[key] = resolveRoutineVars(child, params);
+    return output;
+  }
+  if (typeof value !== 'string') return value;
+  const exact = value.match(/^\{\{(?:params\.)?([A-Za-z][A-Za-z0-9_]*)\}\}$/);
+  if (exact && Object.prototype.hasOwnProperty.call(params, exact[1])) return params[exact[1]];
+  return value.replace(/\{\{(?:params\.)?([A-Za-z][A-Za-z0-9_]*)\}\}/g, (match, name) => (
+    Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match
+  ));
+}
+
+function validateRoutineParams(schema, input = {}) {
+  const definitions = Array.isArray(schema) ? schema : [];
+  const output = {};
+  const errors = [];
+  for (const definition of definitions) {
+    const name = String(definition && definition.name || '').trim();
+    if (!name) continue;
+    let value = Object.prototype.hasOwnProperty.call(input || {}, name) ? input[name] : definition.default;
+    if ((value === undefined || value === null || value === '') && definition.required) {
+      errors.push(`${definition.label || name} is required`);
+      continue;
+    }
+    if (value === undefined) continue;
+    if (definition.type === 'number') {
+      value = Number(value);
+      if (!Number.isFinite(value)) { errors.push(`${definition.label || name} must be numeric`); continue; }
+      if (definition.min != null && value < Number(definition.min)) errors.push(`${definition.label || name} must be at least ${definition.min}`);
+      if (definition.max != null && value > Number(definition.max)) errors.push(`${definition.label || name} must be at most ${definition.max}`);
+    } else if (definition.type === 'boolean') {
+      value = value === true || /^(1|true|yes)$/i.test(String(value));
+    } else {
+      value = String(value);
+    }
+    output[name] = value;
+  }
+  return { valid: errors.length === 0, params: output, errors };
+}
+
 // ---- POST al Command Router (mismo proceso), devuelve {success,message,data} ----
 // Scripts de la suite TikMatrix que son bucles de minutos, no comandos puntuales:
 // con el timeout general de 130s el router abortaba un warmup de 10 minutos a la
@@ -47,7 +114,7 @@ function routerDispatch(serial, command, params) {
 }
 
 // ---- executor: traduce un paso de rutina y lo ejecuta ----
-async function executeStep(device, step) {
+async function executeStep(device, step, runtime = {}) {
   try {
     const control = labControl.assertOperational();
     if (control.lab_mode_enabled) {
@@ -127,8 +194,11 @@ async function executeStep(device, step) {
         }
         return norm(rr, 'Salud leída');
       }
-      case 'WAIT': case 'TYPING_DELAY':
-        await sleep(step.duration ?? 1000); return { success: true, message: `Espera ${step.duration ?? 1000}ms`, data: null };
+      case 'WAIT': case 'TYPING_DELAY': {
+        const duration = Number(step.duration ?? 1000);
+        const waited = await cancellableDelay(runtime.taskId, duration);
+        return waited.success ? { ...waited, message: `Espera ${duration}ms` } : waited;
+      }
       case 'REPORT_RESULT':
         return { success: true, message: 'Resultado reportado', data: null };
 
@@ -151,9 +221,45 @@ async function executeStep(device, step) {
       case 'PRESS_HOME': return norm(await routerDispatch(device.serial_number, 'PRESS_HOME', {}), 'Home');
       case 'WAIT_FOR_ELEMENT': return norm(await routerDispatch(device.serial_number, 'WAIT_FOR_ELEMENT', { timeout_ms: step.timeout_ms ?? (step.timeout ? step.timeout * 1000 : 30000), text: step.text, resource_id: step.resource_id ?? step.resourceId }), 'Elemento encontrado');
       case 'CAPTURE_SCREEN': return norm(await routerDispatch(device.serial_number, 'CAPTURE_SCREEN', {}), 'Captura');
-      case 'PLAY_MEDIA': { const ds = step.duration_seconds ?? step.durationSeconds ?? 30; return norm(await routerDispatch(device.serial_number, 'PLAY_MEDIA', { duration_seconds: ds }), `Reproducido ${ds}s`); }
+      case 'PLAY_MEDIA': {
+        const ds = Number(step.duration_seconds ?? step.durationSeconds ?? 30);
+        const waited = await cancellableDelay(runtime.taskId, ds * 1000);
+        return waited.success ? { ...waited, message: `Reproducido ${ds}s` } : waited;
+      }
       case 'PAUSE_MEDIA': return norm(await routerDispatch(device.serial_number, 'PAUSE_MEDIA', {}), 'Media pausado');
       case 'GOTO_URL': return norm(await routerDispatch(device.serial_number, 'GOTO_URL', { url: step.url }), `URL ${step.url}`);
+      case 'OPEN_WEB_SEARCH': {
+        const query = String(step.query || '').trim();
+        if (!query) return { success: false, message: 'Search query is required', data: null };
+        const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+        return norm(await routerDispatch(device.serial_number, 'GOTO_URL', { url }), `Google search: ${query}`);
+      }
+      case 'CAPTURE_FOREGROUND_APP': {
+        const result = norm(await routerDispatch(device.serial_number, 'GET_FOREGROUND_APP', {}), 'Foreground app captured');
+        const pkg = result.data && result.data.package_name;
+        if (result.success && pkg) runtime.originalPackage = pkg;
+        return result.success && pkg ? { ...result, message: `Original app captured: ${pkg}` } : { success: false, message: 'Could not identify the foreground app', data: result.data };
+      }
+      case 'RESTORE_FOREGROUND_APP': {
+        const pkg = String(runtime.originalPackage || '').trim();
+        if (!pkg) return { success: false, message: 'No captured foreground app is available', data: null };
+        return norm(await routerDispatch(device.serial_number, 'OPEN_APP', { package_name: pkg }), `Original app restored: ${pkg}`);
+      }
+      case 'REPEAT_SCROLL': {
+        const count = Math.max(1, Math.min(50, Number(step.count) || 1));
+        const pauseMs = Math.max(0, Math.min(10000, Number(step.pause_ms) || 800));
+        for (let index = 0; index < count; index++) {
+          const reason = taskStopReason(runtime.taskId);
+          if (reason) return { success: false, cancelled: true, message: reason, data: { completed: index } };
+          const result = norm(await routerDispatch(device.serial_number, 'SCROLL', { direction: step.direction || 'down' }), 'Scroll');
+          if (!result.success) return { ...result, data: { ...(result.data || {}), completed: index } };
+          if (index < count - 1 && pauseMs) {
+            const waited = await cancellableDelay(runtime.taskId, pauseMs);
+            if (!waited.success) return { ...waited, data: { completed: index + 1 } };
+          }
+        }
+        return { success: true, message: `${count} scrolls completed`, data: { completed: count } };
+      }
 
       default: {
         // Passthrough: utilidades ADB nuevas (INSTALL_APK, REBOOT, TAP_XY, SETTINGS_PUT…)
@@ -194,7 +300,11 @@ async function dispatchWorkflow(workflow, { groupId = null, deviceIds = null, pa
   try { control = labControl.assertOperational(); }
   catch (error) { return { task: null, devices_assigned: 0, message: error.message }; }
   if (!workflow || workflow.status !== 'active') return { task: null, devices_assigned: 0, message: 'La rutina debe estar activa' };
-  const steps = safeJson(workflow.steps, []);
+  const parameterSchema = safeJson(workflow.parameter_schema, []);
+  const checkedParams = validateRoutineParams(parameterSchema, params || {});
+  if (!checkedParams.valid) return { task: null, devices_assigned: 0, message: checkedParams.errors.join('; ') };
+  const resolvedParams = { ...(params || {}), ...checkedParams.params };
+  const steps = resolveRoutineVars(safeJson(workflow.steps, []), resolvedParams);
   if (control.lab_mode_enabled) {
     const validation = labControl.validateWorkflowSteps(steps);
     if (!validation.valid) return { task: null, devices_assigned: 0, message: validation.errors.join('; ') };
@@ -218,7 +328,7 @@ async function dispatchWorkflow(workflow, { groupId = null, deviceIds = null, pa
 
   const ext = 'task-' + uuid();
   const ins = DB.run('INSERT INTO tasks(external_id,workflow_id,params,status,started_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?)',
-    [ext, workflow.id, JSON.stringify(params || {}), 'running', now(), now(), now()]);
+    [ext, workflow.id, JSON.stringify(labControl.sanitize(resolvedParams)), 'running', now(), now(), now()]);
   const taskId = ins.lastInsertRowid;
 
   for (const d of devices) {
@@ -238,6 +348,7 @@ async function runDeviceSteps(taskId, steps, d) {
   DB.run('UPDATE task_assignments SET status=?, started_at=? WHERE task_id=? AND device_id=?', ['running', now(), taskId, d.id]);
   let failed = false, cancelled = false, lastMsg = null;
   let settings = null; try { settings = require('./settings'); } catch (_) {}
+  const runtime = { taskId, originalPackage: null };
   for (let i = 0; i < steps.length; i++) {
     const task = DB.get('SELECT status FROM tasks WHERE id=?', [taskId]);
     const control = labControl.state();
@@ -248,11 +359,15 @@ async function runDeviceSteps(taskId, steps, d) {
     }
     const step = steps[i];
     let r;
-    try { r = await executeStep(d, step); }
+    try { r = await executeStep(d, step, runtime); }
     catch (e) { r = { success: false, message: e.message, data: {} }; }
     DB.run('INSERT INTO execution_logs(task_id,device_serial,command_type,success,message,result_data,timestamp,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
       [taskId, d.serial_number, step.type, r.success ? 1 : 0, r.message, JSON.stringify(labControl.sanitize(r.data ?? {})), now(), now(), now()]);
-    if (!r.success) { failed = true; lastMsg = r.message; break; }
+    if (!r.success) {
+      if (r.cancelled) cancelled = true; else failed = true;
+      lastMsg = r.message;
+      break;
+    }
     if (settings && i < steps.length - 1) { const d2 = settings.interStepDelayMs(); if (d2 > 0) await sleep(d2); }
   }
   const finalStatus = cancelled ? 'cancelled' : (failed ? 'failed' : 'completed');
@@ -318,4 +433,4 @@ function scheduleTick() {
 
 function safeJson(v, def) { if (v == null) return def; if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch { return def; } }
 
-module.exports = { init, executeStep, dispatchWorkflow, scheduleTick, routerDispatch, safeJson, runDeviceSteps, validateWorkflowSteps: labControl.validateWorkflowSteps };
+module.exports = { init, executeStep, dispatchWorkflow, scheduleTick, routerDispatch, safeJson, runDeviceSteps, resolveRoutineVars, validateRoutineParams, validateWorkflowSteps: labControl.validateWorkflowSteps };

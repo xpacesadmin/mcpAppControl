@@ -964,7 +964,7 @@ function createServer(db, routerPort, apiToken = '') {
     if (req.query.status) { sql += ` AND status = ?`; params.push(req.query.status); }
     if (req.query.search) { sql += ` AND name LIKE ?`; params.push(`%${req.query.search}%`); }
     sql += ` ORDER BY id DESC`;
-    const list = db.all(sql, params).map(w => ({ ...w, steps: logic.safeJson(w.steps, []) }));
+    const list = db.all(sql, params).map(w => ({ ...w, steps: logic.safeJson(w.steps, []), parameter_schema: logic.safeJson(w.parameter_schema, []) }));
     res.json({ success: true, data: paginate(list, req.query.page, req.query.per_page) });
   });
 
@@ -987,13 +987,14 @@ function createServer(db, routerPort, apiToken = '') {
     const wf = db.get(`SELECT * FROM workflows WHERE id = ?`, [req.params.id]);
     if (!wf) return res.status(404).json({ success: false, message: 'Workflow not found' });
     wf.steps = logic.safeJson(wf.steps, []);
+    wf.parameter_schema = logic.safeJson(wf.parameter_schema, []);
     const targets = db.all(`SELECT device_id FROM workflow_device_targets WHERE workflow_id = ?`, [wf.id]).map(t => t.device_id);
     wf.target_devices = targets.length ? db.all(`SELECT id, name, serial_number, status FROM devices WHERE id IN (${targets.join(',')})`) : [];
     res.json({ success: true, data: wf });
   });
 
   app.post('/api/v1/workflows', (req, res) => {
-    const { name, description, steps, allowed_package, device_ids } = req.body;
+    const { name, description, steps, allowed_package, parameter_schema, device_ids } = req.body;
     if (!name || !steps || !Array.isArray(steps)) return res.status(422).json({ success: false, message: 'Nombre y pasos válidos son requeridos' });
     const validation = logic.validateWorkflowSteps(steps);
     if (labControl.state().lab_mode_enabled && !validation.valid) {
@@ -1001,8 +1002,8 @@ function createServer(db, routerPort, apiToken = '') {
     }
 
 
-    const r = db.run(`INSERT INTO workflows(name, description, steps, allowed_package, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`,
-      [name, description || null, JSON.stringify(steps), allowed_package || null, 'draft', now(), now()]);
+    const r = db.run(`INSERT INTO workflows(name, description, steps, allowed_package, parameter_schema, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`,
+      [name, description || null, JSON.stringify(steps), allowed_package || null, JSON.stringify(Array.isArray(parameter_schema) ? parameter_schema : []), 'draft', now(), now()]);
     const wfId = r.lastInsertRowid;
     if (Array.isArray(device_ids)) {
       for (const did of device_ids) {
@@ -1011,21 +1012,22 @@ function createServer(db, routerPort, apiToken = '') {
     }
     const wf = db.get(`SELECT * FROM workflows WHERE id = ?`, [wfId]);
     wf.steps = logic.safeJson(wf.steps, []);
+    wf.parameter_schema = logic.safeJson(wf.parameter_schema, []);
     res.status(201).json({ success: true, data: wf, message: 'Workflow created successfully' });
   });
 
   app.put('/api/v1/workflows/:id', (req, res) => {
     const wf = db.get(`SELECT * FROM workflows WHERE id = ?`, [req.params.id]);
     if (!wf) return res.status(404).json({ success: false, message: 'Workflow not found' });
-    const { name, description, steps, allowed_package, status, device_ids } = req.body;
+    const { name, description, steps, allowed_package, parameter_schema, status, device_ids } = req.body;
     if (steps && labControl.state().lab_mode_enabled) {
       const validation = logic.validateWorkflowSteps(steps);
       if (!validation.valid) return res.status(422).json({ success: false, message: validation.errors.join('; '), data: validation });
     }
 
 
-    db.run(`UPDATE workflows SET name=COALESCE(?,name), description=COALESCE(?,description), steps=COALESCE(?,steps), allowed_package=COALESCE(?,allowed_package), status=COALESCE(?,status), updated_at=? WHERE id=?`,
-      [name || null, description || null, steps ? JSON.stringify(steps) : null, allowed_package || null, status || null, now(), wf.id]);
+    db.run(`UPDATE workflows SET name=COALESCE(?,name), description=COALESCE(?,description), steps=COALESCE(?,steps), allowed_package=COALESCE(?,allowed_package), parameter_schema=COALESCE(?,parameter_schema), status=COALESCE(?,status), updated_at=? WHERE id=?`,
+      [name || null, description || null, steps ? JSON.stringify(steps) : null, allowed_package || null, Array.isArray(parameter_schema) ? JSON.stringify(parameter_schema) : null, status || null, now(), wf.id]);
 
     if (Array.isArray(device_ids)) {
       db.run(`DELETE FROM workflow_device_targets WHERE workflow_id = ?`, [wf.id]);
@@ -1035,6 +1037,7 @@ function createServer(db, routerPort, apiToken = '') {
     }
     const updated = db.get(`SELECT * FROM workflows WHERE id = ?`, [wf.id]);
     updated.steps = logic.safeJson(updated.steps, []);
+    updated.parameter_schema = logic.safeJson(updated.parameter_schema, []);
     res.json({ success: true, data: updated, message: 'Workflow updated successfully' });
   });
 

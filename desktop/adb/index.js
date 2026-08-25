@@ -518,6 +518,26 @@ function findBoundsBy(xml, attr, value) {
   return { x: Math.round((+m[1] + +m[3]) / 2), y: Math.round((+m[2] + +m[4]) / 2) };
 }
 
+function findFirstActionableBounds(xml, { minY = 250, maxY = 100000, excludeText = '' } = {}) {
+  const excluded = String(excludeText || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean);
+  const nodes = String(xml || '').match(/<node\b[^>]*>/gi) || [];
+  for (const node of nodes) {
+    if (!/clickable="true"/i.test(node) || /enabled="false"/i.test(node)) continue;
+    const bounds = node.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/i);
+    if (!bounds) continue;
+    const x = Math.round((Number(bounds[1]) + Number(bounds[3])) / 2);
+    const y = Math.round((Number(bounds[2]) + Number(bounds[4])) / 2);
+    if (y < Number(minY) || y > Number(maxY)) continue;
+    const text = ['text', 'content-desc'].map(attr => {
+      const match = node.match(new RegExp(`${attr}="([^"]*)"`, 'i'));
+      return match ? match[1] : '';
+    }).join(' ').trim();
+    if (!text || excluded.some(term => text.toLowerCase().includes(term))) continue;
+    return { x, y, text };
+  }
+  return null;
+}
+
 async function tapText(serial, text) {
   const xml = await dumpUi(serial);
   const b = findBoundsBy(xml, 'text', text) || findBoundsBy(xml, 'content-desc', text);
@@ -603,11 +623,37 @@ async function execute(serial, command, params) {
         await sleep(2000);
         return { success: true, message: `URL abierta: ${p.url}` };
 
+      case 'GET_FOREGROUND_APP': {
+        const activities = String(await shell(serial, ['dumpsys', 'activity', 'activities']));
+        let match = activities.match(/(?:topResumedActivity|mResumedActivity)[^\n]*?\s([A-Za-z0-9._]+)\/[A-Za-z0-9.$_]+/);
+        if (!match) {
+          const windows = String(await shell(serial, ['dumpsys', 'window', 'windows']));
+          match = windows.match(/mCurrentFocus[^\n]*?\s([A-Za-z0-9._]+)\/[A-Za-z0-9.$_]+/);
+        }
+        const packageName = match && match[1];
+        return packageName
+          ? { success: true, message: `App visible: ${packageName}`, data: { package_name: packageName } }
+          : { success: false, message: 'No se pudo identificar la app visible' };
+      }
+
       case 'CLICK_BY_TEXT':
         return await tapText(serial, String(p.text ?? ''));
 
       case 'CLICK_BY_ID':
         return await tapId(serial, String(p.resource_id ?? ''));
+
+      case 'CLICK_FIRST_ACTIONABLE': {
+        const xml = await dumpUi(serial);
+        const match = findFirstActionableBounds(xml, {
+          minY: Number(p.min_y ?? 250),
+          maxY: Number(p.max_y ?? 100000),
+          excludeText: p.exclude_text || '',
+        });
+        if (!match) return { success: false, message: 'No actionable UI element matched the configured region' };
+        const point = HJ(match.x, match.y);
+        await shell(serial, ['input', 'tap', String(point.x), String(point.y)]);
+        return { success: true, message: `First actionable item tapped: ${match.text}`, data: { text: match.text, x: match.x, y: match.y } };
+      }
 
       case 'SET_TEXT': {
         if (p.resource_id) { const t = await tapId(serial, String(p.resource_id)); if (!t.success) return t; }

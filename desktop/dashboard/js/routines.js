@@ -11,6 +11,11 @@
   const STEP_CATALOG = [
     { type: 'OPEN_APP',        label: 'Abrir app',            icon: '📱', fields: [{ key: 'package_name', label: 'Paquete', ph: 'com.spotify.music' }] },
     { type: 'GOTO_URL',        label: 'Abrir enlace / URL',   icon: '🔗', fields: [{ key: 'url', label: 'URL', ph: 'https://...' }] },
+    { type: 'OPEN_WEB_SEARCH', label: 'Buscar en Google',      icon: '🔎', fields: [{ key: 'query', label: 'Tema / consulta', ph: '{{search_topic}}' }] },
+    { type: 'CAPTURE_FOREGROUND_APP', label: 'Recordar app actual', icon: '📌', fields: [] },
+    { type: 'RESTORE_FOREGROUND_APP', label: 'Volver a app original', icon: '↪️', fields: [] },
+    { type: 'REPEAT_SCROLL',   label: 'Repetir scroll',         icon: '↕️', fields: [{ key: 'direction', label: 'Dirección', type: 'select', options: ['down', 'up'], def: 'down' }, { key: 'count', label: 'Cantidad', ph: '{{scroll_count}}' }, { key: 'pause_ms', label: 'Pausa entre scrolls (ms)', type: 'number', def: 800 }] },
+    { type: 'CLICK_FIRST_ACTIONABLE', label: 'Primer elemento accionable', icon: '🎯', fields: [{ key: 'min_y', label: 'Y mínima', type: 'number', def: 300 }, { key: 'max_y', label: 'Y máxima', type: 'number', def: 2000 }, { key: 'exclude_text', label: 'Excluir textos (separados por coma)', ph: 'Search,Home,Shorts' }] },
     { type: 'WAIT',            label: 'Esperar',              icon: '⏱️', fields: [{ key: 'duration', label: 'Milisegundos', type: 'number', def: 2000 }] },
     { type: 'SCROLL',          label: 'Scroll',               icon: '↕️', fields: [{ key: 'direction', label: 'Dirección', type: 'select', options: ['down', 'up'], def: 'down' }] },
     { type: 'SWIPE',           label: 'Deslizar (swipe)',     icon: '👉', fields: [{ key: 'start_x', label: 'X inicio', type: 'number', def: 500 }, { key: 'start_y', label: 'Y inicio', type: 'number', def: 1500 }, { key: 'end_x', label: 'X fin', type: 'number', def: 500 }, { key: 'end_y', label: 'Y fin', type: 'number', def: 400 }] },
@@ -51,7 +56,28 @@
 
   // Plantillas de rutina listas por red social (nº5). Cada una crea una rutina activa.
   const TEMPLATES = [
-    { name: 'Instagram · scroll + like', platform: 'instagram', steps: [
+    { name: 'General · búsqueda web + YouTube + retorno', platform: 'general', parameter_schema: [
+      { name: 'search_topic', label: 'Tema de búsqueda', type: 'string', required: true, default: '' },
+      { name: 'scroll_count', label: 'Cantidad de scrolls', type: 'number', required: true, default: 3, min: 1, max: 20 },
+      { name: 'watch_seconds', label: 'Segundos por video', type: 'number', required: true, default: 300, min: 10, max: 600 },
+    ], steps: [
+      { type: 'CAPTURE_FOREGROUND_APP' },
+      { type: 'PRESS_HOME' },
+      { type: 'OPEN_WEB_SEARCH', query: '{{search_topic}}' },
+      { type: 'WAIT', duration: 4000 },
+      { type: 'CLICK_FIRST_ACTIONABLE', min_y: 350, max_y: 1800, exclude_text: 'Search,Google,More,Sign in' },
+      { type: 'WAIT', duration: 3000 },
+      { type: 'REPEAT_SCROLL', direction: 'down', count: '{{scroll_count}}', pause_ms: 900 },
+      { type: 'PRESS_BACK' },
+      { type: 'OPEN_APP', package_name: 'com.google.android.youtube' },
+      { type: 'WAIT', duration: 5000 },
+      { type: 'CLICK_FIRST_ACTIONABLE', min_y: 300, max_y: 1800, exclude_text: 'Home,Shorts,Subscriptions,You' },
+      { type: 'PLAY_MEDIA', duration_seconds: '{{watch_seconds}}' },
+      { type: 'INPUT_KEYEVENT', keycode: 87 },
+      { type: 'PLAY_MEDIA', duration_seconds: '{{watch_seconds}}' },
+      { type: 'FORCE_STOP', package_name: 'com.google.android.youtube' },
+      { type: 'RESTORE_FOREGROUND_APP' },
+    ] },    { name: 'Instagram · scroll + like', platform: 'instagram', steps: [
       { type: 'OPEN_APP', package_name: 'com.instagram.android' }, { type: 'WAIT', duration: 4000 },
       { type: 'CHECK_BAN' },
       { type: 'SCROLL', direction: 'down' }, { type: 'WAIT', duration: 3000 },
@@ -102,6 +128,7 @@
   const DAYS = [{ v: 1, l: 'Lun' }, { v: 2, l: 'Mar' }, { v: 3, l: 'Mié' }, { v: 4, l: 'Jue' }, { v: 5, l: 'Vie' }, { v: 6, l: 'Sáb' }, { v: 0, l: 'Dom' }];
 
   let steps = [];              // pasos de la rutina en edición
+  let parameters = [];         // parámetros solicitados al ejecutar
   let editingWorkflowId = null;
   let editingScheduleId = null;
   let cacheWorkflows = [], cacheGroups = [], cacheSchedules = [];
@@ -228,7 +255,7 @@
       </div>`).join('');
   }
 
-  window.rtNewRoutine = () => { editingWorkflowId = null; steps = []; renderRoutineEditor(); renderRoutineList(); fillTemplatePicker(); };
+  window.rtNewRoutine = () => { editingWorkflowId = null; steps = []; parameters = []; renderRoutineEditor(); renderRoutineList(); fillTemplatePicker(); };
 
   function fillTemplatePicker() {
     const sel = $('rtTplPicker'); if (!sel || sel.options.length > 1) return;
@@ -239,6 +266,7 @@
     const t = TEMPLATES[Number(idx)]; if (!t) return;
     editingWorkflowId = null;
     steps = JSON.parse(JSON.stringify(t.steps));
+    parameters = JSON.parse(JSON.stringify(t.parameter_schema || []));
     renderRoutineEditor({ name: t.name, description: 'Plantilla ' + (t.platform || '') });
     renderRoutineList();
   };
@@ -249,6 +277,7 @@
       const wf = res.data;
       editingWorkflowId = wf.id;
       steps = Array.isArray(wf.steps) ? wf.steps.map(normalizeStep) : [];
+      parameters = Array.isArray(wf.parameter_schema) ? JSON.parse(JSON.stringify(wf.parameter_schema)) : [];
       renderRoutineEditor(wf);
       renderRoutineList();
     } catch (e) { alert('No se pudo cargar la rutina: ' + e.message); }
@@ -263,6 +292,11 @@
       <div class="rt-field"><label>Nombre de la rutina</label><input id="rtName" type="text" value="${escA(name)}" placeholder="p. ej. Sesión Spotify mañana"></div>
       <div class="rt-field"><label>Descripción (opcional)</label><input id="rtDesc" type="text" value="${escA(desc)}" placeholder="Qué hace esta rutina"></div>
       <div class="rt-steps-head">
+        <span>Parámetros al ejecutar (${parameters.length})</span>
+        <button class="rt-btn" onclick="rtAddParam()">+ Parámetro</button>
+      </div>
+      <div id="rtParamsList" class="rt-steps"></div>
+      <div class="rt-steps-head">
         <span>Pasos (${steps.length})</span>
         <select id="rtStepPicker" class="rt-mini-select">
           <option value="">+ Añadir paso…</option>
@@ -276,8 +310,37 @@
         <button class="rt-btn primary" onclick="rtSaveRoutine()">💾 Guardar rutina</button>
       </div>
       <div id="rtRoutineMsg" class="rt-msg"></div>`;
+    renderParams();
     $('rtStepPicker').onchange = (e) => { if (e.target.value) { addStep(e.target.value); e.target.value = ''; } };
     renderSteps();
+  }
+
+  function renderParams() {
+    const box = $('rtParamsList'); if (!box) return;
+    if (!parameters.length) { box.innerHTML = '<p class="rt-empty">Sin parámetros. Puedes usar valores fijos en los pasos.</p>'; return; }
+    box.innerHTML = parameters.map((param, index) => `
+      <div class="rt-step">
+        <div class="rt-step-top"><span class="rt-step-idx">${index + 1}</span><span class="rt-step-title">⚙️ ${esc(param.label || param.name || 'Parámetro')}</span><button class="del" onclick="rtDelParam(${index})">✕</button></div>
+        <div class="rt-step-fields">
+          <label class="rt-sf">Nombre<input value="${escA(param.name || '')}" placeholder="search_topic" oninput="rtSetParam(${index},'name',this.value)"></label>
+          <label class="rt-sf">Etiqueta<input value="${escA(param.label || '')}" placeholder="Tema de búsqueda" oninput="rtSetParam(${index},'label',this.value)"></label>
+          <label class="rt-sf">Tipo<select onchange="rtSetParam(${index},'type',this.value)"><option value="string" ${param.type !== 'number' && param.type !== 'boolean' ? 'selected' : ''}>Texto</option><option value="number" ${param.type === 'number' ? 'selected' : ''}>Número</option><option value="boolean" ${param.type === 'boolean' ? 'selected' : ''}>Sí/No</option></select></label>
+          <label class="rt-sf">Valor predeterminado<input value="${escA(param.default ?? '')}" oninput="rtSetParam(${index},'default',this.value)"></label>
+          <label class="rt-sf">Obligatorio<select onchange="rtSetParam(${index},'required',this.value === 'true')"><option value="true" ${param.required ? 'selected' : ''}>Sí</option><option value="false" ${param.required ? '' : 'selected'}>No</option></select></label>
+        </div>
+      </div>`).join('');
+  }
+  window.rtAddParam = () => { parameters.push({ name: '', label: '', type: 'string', required: true, default: '' }); renderParams(); };
+  window.rtSetParam = (index, key, value) => { if (parameters[index]) parameters[index][key] = value; };
+  window.rtDelParam = (index) => { parameters.splice(index, 1); renderParams(); };
+
+  function cleanParameters() {
+    return parameters.map(param => {
+      const output = { ...param, name: String(param.name || '').trim(), label: String(param.label || '').trim() };
+      if (output.type === 'number' && output.default !== '') output.default = Number(output.default);
+      if (!output.label) output.label = output.name;
+      return output;
+    }).filter(param => /^[A-Za-z][A-Za-z0-9_]*$/.test(param.name));
   }
 
   function addStep(type) {
@@ -288,7 +351,7 @@
     renderSteps();
     updateStepCount();
   }
-  const updateStepCount = () => { const h = document.querySelector('.rt-steps-head span'); if (h) h.textContent = `Pasos (${steps.length})`; };
+  const updateStepCount = () => { const head = $('rtStepPicker') && $('rtStepPicker').closest('.rt-steps-head'); const h = head && head.querySelector('span'); if (h) h.textContent = `Pasos (${steps.length})`; };
 
   function renderSteps() {
     const box = $('rtStepsList'); if (!box) return;
@@ -304,7 +367,7 @@
             </select></label>`;
         }
         return `<label class="rt-sf">${esc(f.label || f.key)}
-          <input type="${f.type === 'number' ? 'number' : 'text'}" value="${escA(val)}" placeholder="${escA(f.ph || '')}" oninput="rtSetField(${i},'${f.key}',this.value)"></label>`;
+          <input type="${f.type === 'number' && !String(val).includes('{{') ? 'number' : 'text'}" value="${escA(val)}" placeholder="${escA(f.ph || '')}" oninput="rtSetField(${i},'${f.key}',this.value)"></label>`;
       }).join('');
       return `
       <div class="rt-step">
@@ -336,7 +399,7 @@
       cat.fields.forEach(f => {
         let v = st[f.key];
         if (v === undefined || v === '') return;
-        if (f.type === 'number') v = Number(v);
+        if (f.type === 'number' && !/^\\{\\{(?:params\\.)?[A-Za-z][A-Za-z0-9_]*\\}\\}$/.test(String(v))) v = Number(v);
         out[f.key] = v;
       });
       return out;
@@ -350,7 +413,7 @@
     if (!name) { msg.textContent = 'Ponle un nombre a la rutina.'; msg.className = 'rt-msg err'; return; }
     if (!steps.length) { msg.textContent = 'Añade al menos un paso.'; msg.className = 'rt-msg err'; return; }
     const selectedIds = typeof selectedDeviceIds !== 'undefined' ? [...selectedDeviceIds] : [];
-    const payload = { name, description, steps: cleanSteps() };
+    const payload = { name, description, steps: cleanSteps(), parameter_schema: cleanParameters() };
     if (selectedIds.length) payload.device_ids = selectedIds;
     try {
       let wf;
@@ -375,7 +438,7 @@
     if (!confirm('¿Borrar esta rutina?')) return;
     try {
       await apiFetch('/workflows/' + editingWorkflowId, { method: 'DELETE' });
-      editingWorkflowId = null; steps = [];
+      editingWorkflowId = null; steps = []; parameters = [];
       await refreshData(); renderRoutineList(); renderRoutineEditor();
     } catch (e) { alert('Error: ' + e.message); }
   };
@@ -385,7 +448,15 @@
     const msg = $('rtRoutineMsg');
     try {
       const selectedIds = typeof selectedDeviceIds !== 'undefined' ? [...selectedDeviceIds] : [];
-      const body = selectedIds.length ? { device_ids: selectedIds } : {};
+      if (!selectedIds.length) throw new Error('Selecciona explícitamente uno o más dispositivos.');
+      const runParams = {};
+      for (const param of cleanParameters()) {
+        const answer = prompt(param.label || param.name, param.default ?? '');
+        if (answer === null) throw new Error('Ejecución cancelada por el operador.');
+        if (param.required && answer.trim() === '') throw new Error(`${param.label || param.name} es obligatorio.`);
+        runParams[param.name] = param.type === 'number' ? Number(answer) : (param.type === 'boolean' ? /^(1|true|yes|sí|si)$/i.test(answer) : answer);
+      }
+      const body = { device_ids: selectedIds, params: runParams };
       const r = await apiFetch('/workflows/' + editingWorkflowId + '/execute', { method: 'POST', body: JSON.stringify(body) });
       msg.textContent = '▶️ ' + (r.message || 'Lanzada'); msg.className = 'rt-msg ok';
     } catch (e) { msg.textContent = 'Error al ejecutar: ' + e.message; msg.className = 'rt-msg err'; }
