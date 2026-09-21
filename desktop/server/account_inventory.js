@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const { now } = require('./db');
+const accountsStore = require('./accounts');
 
 let DB = null;
 let DISPATCH = null;
@@ -13,7 +14,7 @@ let configFile = null;
 let running = false;
 let nextRunAt = 0;
 
-const defaults = { enabled: true, interval_sec: 300, platform: 'com.google' };
+const defaults = { enabled: false, interval_sec: 300, platform: 'com.google' };
 let config = { ...defaults };
 
 function init(db, opts = {}) {
@@ -22,11 +23,12 @@ function init(db, opts = {}) {
   ALERTS = opts.alerts;
   LAB = opts.labControl;
   const dir = path.dirname(db.file && db.file !== ':memory:' ? db.file : __dirname);
-  configFile = path.join(dir, 'account-inventory-config.json');
+  configFile = opts.configFile === false ? null : path.join(dir, 'account-inventory-config.json');
+  config = { ...defaults };
   try {
-    if (fs.existsSync(configFile)) config = normalizeConfig({ ...config, ...JSON.parse(fs.readFileSync(configFile, 'utf8')) });
+    if (configFile && fs.existsSync(configFile)) config = normalizeConfig({ ...defaults, ...JSON.parse(fs.readFileSync(configFile, 'utf8')) });
   } catch (_) { config = { ...defaults }; }
-  nextRunAt = Date.now() + 60000;
+  nextRunAt = config.enabled ? Date.now() + 60000 : 0;
 }
 
 function requireInit() {
@@ -37,7 +39,7 @@ function normalizeConfig(input = {}) {
   const interval = Math.max(60, Math.min(86400, Number(input.interval_sec || defaults.interval_sec)));
   const platform = String(input.platform || defaults.platform).trim();
   if (!/^[A-Za-z0-9._-]{2,100}$/.test(platform)) throw new Error('platform inválida');
-  return { enabled: input.enabled !== false, interval_sec: interval, platform };
+  return { enabled: input.enabled === true, interval_sec: interval, platform };
 }
 
 function getConfig() {
@@ -63,31 +65,45 @@ function labelFor(device, account) {
 
 function assignedFor(deviceId, platform) {
   return DB.all(
-    "SELECT * FROM accounts WHERE device_id=? AND platform=? AND active=1 ORDER BY id",
+    'SELECT * FROM accounts WHERE device_id=? AND platform=? AND active=1 ORDER BY id',
     [Number(deviceId), platform]
   );
 }
 
 async function notifyTransition(device, account, previous, next) {
-  if (!ALERTS || !ALERTS.notify || previous === next || previous === 'unknown') return;
+  if (!ALERTS || !ALERTS.notify || previous === next) return;
+  if (previous === 'unknown' && !['missing', 'swapped', 'needs_reauth'].includes(next)) {
+    return;
+  }
   const label = labelFor(device, account);
+  const common = {
+    device_serial: device.adb_serial || device.serial_number,
+    data: { account_id: account.id, device_id: device.id, platform: account.platform, state: next },
+  };
   if (next === 'missing') {
     await ALERTS.notify({
-      type: 'account_missing', severity: 'critical', device_serial: device.adb_serial || device.serial_number,
+      ...common, type: 'account_missing', severity: 'critical',
       message: `${label}: assigned Google account is no longer present`,
-      data: { account_id: account.id, device_id: device.id, platform: account.platform, state: next },
     });
-  } else if (next === 'present' && ['missing', 'unreachable'].includes(previous)) {
+  } else if (next === 'swapped') {
     await ALERTS.notify({
-      type: 'account_recovered', severity: 'info', device_serial: device.adb_serial || device.serial_number,
+      ...common, type: 'account_swapped', severity: 'critical',
+      message: `${label}: assigned Google account is absent and another Google account is present`,
+    });
+  } else if (next === 'needs_reauth') {
+    await ALERTS.notify({
+      ...common, type: 'account_needs_reauth', severity: 'warning',
+      message: `${label}: operator marked the account as requiring sign-in`,
+    });
+  } else if (next === 'present' && ['missing', 'swapped', 'needs_reauth', 'unreachable', 'unknown'].includes(previous)) {
+    await ALERTS.notify({
+      ...common, type: 'account_recovered', severity: 'info',
       message: `${label}: assigned Google account is present again`,
-      data: { account_id: account.id, device_id: device.id, platform: account.platform, state: next },
     });
-  } else if (next === 'unreachable' && previous === 'present') {
+  } else if (next === 'unreachable' && ['present', 'needs_reauth'].includes(previous)) {
     await ALERTS.notify({
-      type: 'account_check_unreachable', severity: 'warning', device_serial: device.adb_serial || device.serial_number,
+      ...common, type: 'account_check_unreachable', severity: 'warning',
       message: `${label}: account check could not reach the device`,
-      data: { account_id: account.id, device_id: device.id, platform: account.platform, state: next },
     });
   }
 }
@@ -95,14 +111,33 @@ async function notifyTransition(device, account, previous, next) {
 async function recordState(device, account, state, message) {
   const previous = account.verification_state || 'unknown';
   const timestamp = now();
-  const missingCount = state === 'missing' ? Number(account.consecutive_missing || 0) + 1 : 0;
+  const missingCount = ['missing', 'swapped'].includes(state) ? Number(account.consecutive_missing || 0) + 1 : 0;
   DB.run(
     `UPDATE accounts SET verification_state=?,last_verified_at=?,
-       last_seen_on_device_at=CASE WHEN ?='present' THEN ? ELSE last_seen_on_device_at END,
+       last_seen_on_device_at=CASE WHEN ? IN ('present','needs_reauth') THEN ? ELSE last_seen_on_device_at END,
        last_verification_message=?,consecutive_missing=?,updated_at=? WHERE id=?`,
     [state, timestamp, state, timestamp, String(message || '').slice(0, 240), missingCount, timestamp, account.id]
   );
   await notifyTransition(device, account, previous, state);
+}
+
+function resultSkeleton(base, state, success, message = null) {
+  return {
+    ...base,
+    success,
+    state,
+    message,
+    real_count: 0,
+    present_count: 0,
+    missing_count: 0,
+    swapped_count: 0,
+    needs_reauth_count: 0,
+    missing_from_device: [],
+    unexpected_on_device: [],
+    real_accounts: [],
+    assigned_accounts: [],
+    mismatched: [],
+  };
 }
 
 function scoped(device) {
@@ -126,7 +161,7 @@ async function verifyDevice(deviceOrId, options = {}) {
     platform,
     assigned_count: assigned.length,
   };
-  if (!assigned.length) return { ...base, success: true, state: 'unassigned', real_count: 0, present_count: 0, missing_from_device: [], unexpected_on_device: [] };
+  if (!assigned.length) return resultSkeleton(base, 'unassigned', true);
 
   let response;
   try { response = await DISPATCH(device.adb_serial || device.serial_number, 'CHECK_ACCOUNTS', {}); }
@@ -136,37 +171,182 @@ async function verifyDevice(deviceOrId, options = {}) {
     for (const account of assigned) await recordState(device, account, 'unreachable', response && response.message || 'ADB account check failed');
     if (LAB && LAB.audit) LAB.audit('account_inventory.verify_device', 'unreachable', {
       platform, assigned_count: assigned.length, present_count: 0, missing_count: 0,
+      identifiers_exposed: false,
     }, { device_id: device.id });
-    return { ...base, success: false, state: 'unreachable', message: response && response.message || 'ADB account check failed', real_count: 0, present_count: 0, missing_from_device: [], unexpected_on_device: [] };
+    return resultSkeleton(base, 'unreachable', false, response && response.message || 'ADB account check failed');
   }
 
-  const observed = Array.isArray(response.data && response.data.by_type && response.data.by_type[platform])
+  if (!response.data || !response.data.by_type || typeof response.data.by_type !== 'object') {
+    for (const account of assigned) await recordState(device, account, 'unknown', 'Account response did not contain structured account data');
+    if (LAB && LAB.audit) LAB.audit('account_inventory.verify_device', 'unknown', {
+      platform, assigned_count: assigned.length, identifiers_exposed: false,
+    }, { device_id: device.id });
+    return resultSkeleton(base, 'unknown', false, 'The device returned no structured account information');
+  }
+
+  const observed = Array.isArray(response.data.by_type[platform])
     ? response.data.by_type[platform].map(item => norm(item.email)).filter(Boolean)
     : [];
   const observedSet = new Set(observed);
   const assignedSet = new Set(assigned.map(account => norm(account.email)));
+  const unexpected = observed.filter(email => !assignedSet.has(email));
   const missing = [];
   let presentCount = 0;
+  let swappedCount = 0;
+  let needsReauthCount = 0;
+
   for (const account of assigned) {
     const present = observedSet.has(norm(account.email));
-    if (present) presentCount += 1; else missing.push(account.email);
-    await recordState(device, account, present ? 'present' : 'missing', present ? 'Expected account present' : 'Expected account missing');
+    let accountState;
+    if (present) {
+      presentCount += 1;
+      // ADB proves local registration only. It cannot prove that Google's token
+      // is still accepted, so a manual reauth flag remains until explicitly cleared.
+      accountState = account.verification_state === 'needs_reauth' && !options.clear_reauth
+        ? 'needs_reauth'
+        : 'present';
+      if (accountState === 'needs_reauth') needsReauthCount += 1;
+    } else {
+      missing.push(account.email);
+      accountState = unexpected.length ? 'swapped' : 'missing';
+      if (accountState === 'swapped') swappedCount += 1;
+    }
+    const message = accountState === 'present'
+      ? 'Expected account present locally'
+      : accountState === 'needs_reauth'
+        ? 'Account present locally; operator sign-in review remains open'
+        : accountState === 'swapped'
+          ? `Expected account absent; ${unexpected.length} other account(s) observed for this platform`
+          : 'Expected account absent; no other account observed for this platform';
+    await recordState(device, account, accountState, message);
   }
-  const unexpected = observed.filter(email => !assignedSet.has(email));
-  const state = missing.length ? 'missing' : 'present';
+
+  const state = swappedCount ? 'swapped' : missing.length ? 'missing' : needsReauthCount ? 'needs_reauth' : 'present';
   const realAccounts = observed.map(email => ({ email, type: platform, assigned: assignedSet.has(email) }));
   if (LAB && LAB.audit) LAB.audit('account_inventory.verify_device', state, {
     platform, assigned_count: assigned.length, present_count: presentCount,
-    missing_count: missing.length, observed_count: observed.length, unexpected_count: unexpected.length,
+    missing_count: missing.length, swapped_count: swappedCount, needs_reauth_count: needsReauthCount,
+    observed_count: observed.length, unexpected_count: unexpected.length, identifiers_exposed: false,
   }, { device_id: device.id });
   return {
-    ...base, success: true, state, real_count: observed.length, present_count: presentCount,
-    missing_from_device: missing, unexpected_on_device: unexpected,
+    ...base,
+    success: true,
+    state,
+    real_count: observed.length,
+    present_count: presentCount,
+    missing_count: missing.length,
+    swapped_count: swappedCount,
+    needs_reauth_count: needsReauthCount,
+    missing_from_device: missing,
+    unexpected_on_device: unexpected,
     total_real: observed.length,
     total_assigned: assigned.length,
     real_accounts: realAccounts,
-    assigned_accounts: assigned.map(account => ({ email: account.email, platform: account.platform })),
+    assigned_accounts: assigned.map(account => ({
+      id: account.id,
+      email: account.email,
+      platform: account.platform,
+      verification_state: account.verification_state === 'needs_reauth' && !options.clear_reauth
+        ? 'needs_reauth'
+        : observedSet.has(norm(account.email))
+          ? 'present'
+          : unexpected.length ? 'swapped' : 'missing',
+    })),
     mismatched: [],
+  };
+}
+
+// needs_reauth is an operator observation. Android's account registry cannot
+// reliably distinguish a valid Google session from one that needs a password.
+async function setReviewState(accountId, requestedState) {
+  requireInit();
+  const account = DB.get('SELECT * FROM accounts WHERE id=?', [Number(accountId)]);
+  if (!account || !account.active || account.device_id == null) throw new Error('Active assigned account not found');
+  const device = DB.get('SELECT * FROM devices WHERE id=?', [Number(account.device_id)]);
+  if (!device) throw new Error('Assigned device not found');
+  if (!scoped(device)) throw new Error('Operation is outside the exact lab device allowlist');
+
+  const state = String(requestedState || '').trim();
+  if (state === 'needs_reauth') {
+    if (!['present', 'needs_reauth'].includes(account.verification_state || 'unknown')) {
+      throw new Error('Re-login review can only be marked when the expected account is present locally');
+    }
+    const already = account.verification_state === 'needs_reauth';
+    if (!already) await recordState(device, account, 'needs_reauth', 'Operator marked sign-in review as required');
+    if (LAB && LAB.audit) LAB.audit('account_inventory.set_review_state', already ? 'idempotent' : 'ok', {
+      account_id: account.id, device_id: device.id, state, identifiers_exposed: false,
+    });
+    return { account_id: account.id, device_id: device.id, state, idempotent: already };
+  }
+  if (state === 'present') {
+    const result = await verifyDevice(device, { platform: account.platform, source: 'operator_confirmation', clear_reauth: true });
+    const local = result.real_accounts.some(row => norm(row.email) === norm(account.email));
+    if (!local) throw new Error('Cannot clear review: the expected account is not present on the device');
+    if (LAB && LAB.audit) LAB.audit('account_inventory.set_review_state', 'ok', {
+      account_id: account.id, device_id: device.id, state, identifiers_exposed: false,
+    });
+    return { account_id: account.id, device_id: device.id, state, idempotent: account.verification_state === 'present' };
+  }
+  throw new Error('state must be needs_reauth or present');
+}
+
+// A detected swap only changes verification_state. Updating the expected account
+// requires this explicit operator-confirmed action and a fresh device scan.
+async function confirmSwap(input = {}) {
+  requireInit();
+  const expected = DB.get('SELECT * FROM accounts WHERE id=?', [Number(input.expected_account_id)]);
+  if (!expected || expected.device_id == null) throw new Error('Expected account assignment not found');
+  const device = DB.get('SELECT * FROM devices WHERE id=?', [Number(expected.device_id)]);
+  if (!device) throw new Error('Assigned device not found');
+  if (!scoped(device)) throw new Error('Operation is outside the exact lab device allowlist');
+  const observedEmail = norm(input.observed_email);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(observedEmail)) throw new Error('observed_email is invalid');
+
+  const current = assignedFor(device.id, expected.platform)[0];
+  if (current && norm(current.email) === observedEmail) {
+    if (LAB && LAB.audit) LAB.audit('account_inventory.confirm_swap', 'idempotent', {
+      previous_account_id: expected.id, replacement_account_id: current.id,
+      device_id: device.id, platform: expected.platform, identifiers_exposed: false,
+    });
+    return { account: accountsStore.publicView(current), previous_account_id: expected.id, idempotent: true };
+  }
+  if (!expected.active || !current || Number(current.id) !== Number(expected.id)) {
+    throw new Error('Active assignment changed; scan again before confirming the swap');
+  }
+
+  const existing = DB.get(
+    "SELECT * FROM accounts WHERE lower(email)=? AND COALESCE(platform,'')=? LIMIT 1",
+    [observedEmail, expected.platform]
+  );
+  if (existing && existing.device_id != null && Number(existing.device_id) !== Number(device.id)) {
+    throw new Error('Observed account is already assigned to another device');
+  }
+
+  const scan = await verifyDevice(device, { platform: expected.platform, source: 'swap_confirmation' });
+  if (!scan.unexpected_on_device.some(email => norm(email) === observedEmail)) {
+    throw new Error('Observed replacement is no longer present; scan again');
+  }
+  const replacement = accountsStore.upsertAssignment({
+    email: observedEmail,
+    username: observedEmail,
+    platform: expected.platform,
+    notes: `${labelFor(device, expected)} confirmed observed replacement`,
+    status: 'active',
+  }, device.id);
+  const timestamp = now();
+  DB.run(
+    `UPDATE accounts SET verification_state='present',last_verified_at=?,last_seen_on_device_at=?,
+       last_verification_message='Observed replacement confirmed by operator',consecutive_missing=0,updated_at=? WHERE id=?`,
+    [timestamp, timestamp, timestamp, replacement.id]
+  );
+  if (LAB && LAB.audit) LAB.audit('account_inventory.confirm_swap', 'ok', {
+    previous_account_id: expected.id, replacement_account_id: replacement.id,
+    device_id: device.id, platform: expected.platform, identifiers_exposed: false,
+  });
+  return {
+    account: accountsStore.publicView(DB.get('SELECT * FROM accounts WHERE id=?', [replacement.id])),
+    previous_account_id: expected.id,
+    idempotent: false,
   };
 }
 
@@ -181,16 +361,26 @@ async function verifyAll(options = {}) {
   const results = [];
   for (const device of devices) {
     try { results.push(await verifyDevice(device, { platform, source: options.source || 'manual' })); }
-    catch (error) { results.push({ device_id: device.id, device_name: device.name, serial: device.adb_serial, success: false, state: 'error', message: error.message, assigned_count: 0, real_count: 0, present_count: 0, missing_from_device: [], unexpected_on_device: [] }); }
+    catch (error) {
+      results.push(resultSkeleton({
+        device_id: device.id, device_name: device.name, serial: device.adb_serial,
+        platform, assigned_count: 0,
+      }, 'unknown', false, error.message));
+    }
   }
   const summary = {
     devices_checked: results.length,
     devices_present: results.filter(row => row.state === 'present').length,
     devices_missing: results.filter(row => row.state === 'missing').length,
-    devices_unreachable: results.filter(row => row.state === 'unreachable' || row.state === 'error').length,
+    devices_swapped: results.filter(row => row.state === 'swapped').length,
+    devices_needs_reauth: results.filter(row => row.state === 'needs_reauth').length,
+    devices_unreachable: results.filter(row => row.state === 'unreachable').length,
+    devices_unknown: results.filter(row => row.state === 'unknown').length,
     total_real: results.reduce((sum, row) => sum + Number(row.real_count || 0), 0),
     total_assigned: results.reduce((sum, row) => sum + Number(row.assigned_count || 0), 0),
     total_missing: results.reduce((sum, row) => sum + row.missing_from_device.length, 0),
+    total_swapped: results.reduce((sum, row) => sum + Number(row.swapped_count || 0), 0),
+    total_needs_reauth: results.reduce((sum, row) => sum + Number(row.needs_reauth_count || 0), 0),
   };
   return { results, summary };
 }
@@ -218,4 +408,7 @@ async function tick() {
 
 function shutdown() { running = false; nextRunAt = 0; }
 
-module.exports = { init, getConfig, setConfig, verifyDevice, verifyAll, inventory, tick, shutdown };
+module.exports = {
+  init, getConfig, setConfig, verifyDevice, verifyAll, inventory,
+  setReviewState, confirmSwap, tick, shutdown,
+};

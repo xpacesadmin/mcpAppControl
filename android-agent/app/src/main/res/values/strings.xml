@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">MCP Agent</string>
-    <string name="accessibility_service_description">Servicio de accesibilidad para automatización de dispositivos Android en MCP AppControl.</string>
+    <string name="app_name">XSAlpha Agent</string>
+    <string name="accessibility_service_description">Servicio de accesibilidad para control supervisado de dispositivos Android en XSAlpha.</string>
 
     <!-- Connection Status -->
     <string name="status_connected">✓ Conectado</string>
@@ -37,7 +37,7 @@
     <string name="dialog_save">Guardar</string>
     <string name="dialog_cancel">Cancelar</string>
     <string name="dialog_accessibility_title">Servicio de Accesibilidad</string>
-    <string name="dialog_accessibility_message">Para habilitar el servicio, ve a Configuración > Accesibilidad y activa MCP Agent.</string>
+    <string name="dialog_accessibility_message">Para habilitar el servicio, ve a Configuración > Accesibilidad y activa XSAlpha Agent.</string>
 
     <!-- Toast Messages -->
     <string name="toast_connected">Conectado al servidor</string>

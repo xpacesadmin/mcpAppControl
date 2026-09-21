@@ -129,8 +129,14 @@ function createServer(db, routerPort, apiToken = '') {
       /^\/api\/v1\/devices\/[^/]+\/proxy(?:\/|$)/.test(req.path)
     );
     const fullAllowlist = control.lab_full_enabled && control.lab_scope === 'allowlist';
+    // A manual inventory scan only reads Android account metadata and records
+    // verification health. Keep this single POST usable in lab mode without
+    // reopening account enrollment, reassignment, or credential mutations.
+    const manualAccountInventoryScan = req.method === 'POST' &&
+      req.path === '/api/v1/accounts/inventory/scan';
     const legacyAccountAccess = req.path.startsWith('/api/v1/accounts') &&
       (write || req.path.endsWith('/totp')) &&
+      !manualAccountInventoryScan &&
       !fullAllowlist;
     const blocked = legacyProxyWrite ||
       legacyAccountAccess ||
@@ -964,7 +970,12 @@ function createServer(db, routerPort, apiToken = '') {
     if (req.query.status) { sql += ` AND status = ?`; params.push(req.query.status); }
     if (req.query.search) { sql += ` AND name LIKE ?`; params.push(`%${req.query.search}%`); }
     sql += ` ORDER BY id DESC`;
-    const list = db.all(sql, params).map(w => ({ ...w, steps: logic.safeJson(w.steps, []), parameter_schema: logic.safeJson(w.parameter_schema, []) }));
+    const list = db.all(sql, params).map(w => ({
+      ...w,
+      steps: logic.safeJson(w.steps, []),
+      parameter_schema: logic.safeJson(w.parameter_schema, []),
+      execution_options: logic.safeJson(w.execution_options, {}),
+    }));
     res.json({ success: true, data: paginate(list, req.query.page, req.query.per_page) });
   });
 
@@ -988,22 +999,26 @@ function createServer(db, routerPort, apiToken = '') {
     if (!wf) return res.status(404).json({ success: false, message: 'Workflow not found' });
     wf.steps = logic.safeJson(wf.steps, []);
     wf.parameter_schema = logic.safeJson(wf.parameter_schema, []);
+    wf.execution_options = logic.safeJson(wf.execution_options, {});
     const targets = db.all(`SELECT device_id FROM workflow_device_targets WHERE workflow_id = ?`, [wf.id]).map(t => t.device_id);
     wf.target_devices = targets.length ? db.all(`SELECT id, name, serial_number, status FROM devices WHERE id IN (${targets.join(',')})`) : [];
     res.json({ success: true, data: wf });
   });
 
   app.post('/api/v1/workflows', (req, res) => {
-    const { name, description, steps, allowed_package, parameter_schema, device_ids } = req.body;
+    const { name, description, steps, allowed_package, parameter_schema, execution_options, device_ids } = req.body;
     if (!name || !steps || !Array.isArray(steps)) return res.status(422).json({ success: false, message: 'Nombre y pasos válidos son requeridos' });
     const validation = logic.validateWorkflowSteps(steps);
     if (labControl.state().lab_mode_enabled && !validation.valid) {
       return res.status(422).json({ success: false, message: validation.errors.join('; '), data: validation });
     }
 
+    let savedExecutionOptions;
+    try { savedExecutionOptions = logic.normalizeExecutionOptions(execution_options || {}); }
+    catch (error) { return res.status(422).json({ success: false, message: error.message }); }
 
-    const r = db.run(`INSERT INTO workflows(name, description, steps, allowed_package, parameter_schema, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`,
-      [name, description || null, JSON.stringify(steps), allowed_package || null, JSON.stringify(Array.isArray(parameter_schema) ? parameter_schema : []), 'draft', now(), now()]);
+    const r = db.run(`INSERT INTO workflows(name, description, steps, allowed_package, parameter_schema, execution_options, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+      [name, description || null, JSON.stringify(steps), allowed_package || null, JSON.stringify(Array.isArray(parameter_schema) ? parameter_schema : []), JSON.stringify(savedExecutionOptions), 'draft', now(), now()]);
     const wfId = r.lastInsertRowid;
     if (Array.isArray(device_ids)) {
       for (const did of device_ids) {
@@ -1013,21 +1028,27 @@ function createServer(db, routerPort, apiToken = '') {
     const wf = db.get(`SELECT * FROM workflows WHERE id = ?`, [wfId]);
     wf.steps = logic.safeJson(wf.steps, []);
     wf.parameter_schema = logic.safeJson(wf.parameter_schema, []);
+    wf.execution_options = logic.safeJson(wf.execution_options, {});
     res.status(201).json({ success: true, data: wf, message: 'Workflow created successfully' });
   });
 
   app.put('/api/v1/workflows/:id', (req, res) => {
     const wf = db.get(`SELECT * FROM workflows WHERE id = ?`, [req.params.id]);
     if (!wf) return res.status(404).json({ success: false, message: 'Workflow not found' });
-    const { name, description, steps, allowed_package, parameter_schema, status, device_ids } = req.body;
+    const { name, description, steps, allowed_package, parameter_schema, execution_options, status, device_ids } = req.body;
     if (steps && labControl.state().lab_mode_enabled) {
       const validation = logic.validateWorkflowSteps(steps);
       if (!validation.valid) return res.status(422).json({ success: false, message: validation.errors.join('; '), data: validation });
     }
 
+    let savedExecutionOptions = null;
+    if (execution_options !== undefined) {
+      try { savedExecutionOptions = logic.normalizeExecutionOptions(execution_options || {}); }
+      catch (error) { return res.status(422).json({ success: false, message: error.message }); }
+    }
 
-    db.run(`UPDATE workflows SET name=COALESCE(?,name), description=COALESCE(?,description), steps=COALESCE(?,steps), allowed_package=COALESCE(?,allowed_package), parameter_schema=COALESCE(?,parameter_schema), status=COALESCE(?,status), updated_at=? WHERE id=?`,
-      [name || null, description || null, steps ? JSON.stringify(steps) : null, allowed_package || null, Array.isArray(parameter_schema) ? JSON.stringify(parameter_schema) : null, status || null, now(), wf.id]);
+    db.run(`UPDATE workflows SET name=COALESCE(?,name), description=COALESCE(?,description), steps=COALESCE(?,steps), allowed_package=COALESCE(?,allowed_package), parameter_schema=COALESCE(?,parameter_schema), execution_options=COALESCE(?,execution_options), status=COALESCE(?,status), updated_at=? WHERE id=?`,
+      [name || null, description || null, steps ? JSON.stringify(steps) : null, allowed_package || null, Array.isArray(parameter_schema) ? JSON.stringify(parameter_schema) : null, savedExecutionOptions ? JSON.stringify(savedExecutionOptions) : null, status || null, now(), wf.id]);
 
     if (Array.isArray(device_ids)) {
       db.run(`DELETE FROM workflow_device_targets WHERE workflow_id = ?`, [wf.id]);
@@ -1038,6 +1059,7 @@ function createServer(db, routerPort, apiToken = '') {
     const updated = db.get(`SELECT * FROM workflows WHERE id = ?`, [wf.id]);
     updated.steps = logic.safeJson(updated.steps, []);
     updated.parameter_schema = logic.safeJson(updated.parameter_schema, []);
+    updated.execution_options = logic.safeJson(updated.execution_options, {});
     res.json({ success: true, data: updated, message: 'Workflow updated successfully' });
   });
 
@@ -1054,8 +1076,9 @@ function createServer(db, routerPort, apiToken = '') {
   app.post('/api/v1/workflows/:id/execute', async (req, res) => {
     const wf = db.get(`SELECT * FROM workflows WHERE id = ?`, [req.params.id]);
     if (!wf) return res.status(404).json({ success: false, message: 'Workflow not found' });
-    const { device_ids, group_id, params } = req.body;
-    const r = await logic.dispatchWorkflow(wf, { groupId: group_id, deviceIds: device_ids, params });
+    const { device_ids, group_id, params, execution_options } = req.body;
+    const savedExecutionOptions = logic.safeJson(wf.execution_options, {});
+    const r = await logic.dispatchWorkflow(wf, { groupId: group_id, deviceIds: device_ids, params, executionOptions: execution_options ?? savedExecutionOptions });
     if (!r.task) return res.status(422).json({ success: false, message: r.message });
     res.status(201).json({ success: true, data: { task: r.task, devices_assigned: r.devices_assigned }, message: r.message });
   });
@@ -1190,8 +1213,18 @@ function createServer(db, routerPort, apiToken = '') {
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
     const wf = db.get(`SELECT * FROM workflows WHERE id = ?`, [task.workflow_id]);
     if (!wf) return res.status(404).json({ success: false, message: 'Workflow for task not found' });
-    const r = await logic.dispatchWorkflow(wf, { params: logic.safeJson(task.params, {}) });
-    res.json({ success: true, data: r.task, message: 'Task retry initiated' });
+    const retryParams = logic.safeJson(task.params, {});
+    const retryExecutionOptions = retryParams.__execution_options ?? logic.safeJson(wf.execution_options, {});
+    const retryDeviceIds = db.all(
+      'SELECT device_id FROM task_assignments WHERE task_id=? ORDER BY device_id',
+      [task.id]
+    ).map(row => Number(row.device_id));
+    if (!retryDeviceIds.length) {
+      return res.status(422).json({ success: false, message: 'Original task has no device assignments to retry' });
+    }
+    const r = await logic.dispatchWorkflow(wf, { deviceIds: retryDeviceIds, params: retryParams, executionOptions: retryExecutionOptions });
+    if (!r.task) return res.status(422).json({ success: false, message: r.message });
+    res.status(201).json({ success: true, data: r.task, message: 'Task retry initiated on the original devices' });
   });
 
   // ==========================================
@@ -1339,7 +1372,8 @@ function createServer(db, routerPort, apiToken = '') {
     const wf = db.get(`SELECT * FROM workflows WHERE id = ?`, [s.workflow_id]);
     if (!wf) return res.status(422).json({ success: false, message: 'La rutina no existe' });
 
-    const r = await logic.dispatchWorkflow(wf, { groupId: s.group_id, params: { schedule_id: s.id, schedule_name: s.name, manual: true } });
+    const savedExecutionOptions = logic.safeJson(wf.execution_options, {});
+    const r = await logic.dispatchWorkflow(wf, { groupId: s.group_id, params: { schedule_id: s.id, schedule_name: s.name, manual: true }, executionOptions: savedExecutionOptions });
     if (!r.task) return res.status(422).json({ success: false, message: r.message });
     db.run(`UPDATE schedules SET last_run_at = ? WHERE id = ?`, [now(), s.id]);
     res.status(201).json({ success: true, data: { task: r.task, devices_assigned: r.devices_assigned }, message: r.message });
@@ -1472,6 +1506,54 @@ function createServer(db, routerPort, apiToken = '') {
   });
   app.put('/api/v1/accounts/inventory/monitor', (req, res) => {
     res.json({ success: true, data: accountInventory.setConfig(req.body || {}), message: 'Account inventory monitor updated' });
+  });
+  // Explicit scan of active assignments. This reads Android account metadata;
+  // it never requests or returns passwords, tokens, or session material.
+  app.post('/api/v1/accounts/inventory/scan', async (req, res, next) => {
+    try {
+      const body = req.body || {};
+      const data = await accountInventory.verifyAll({
+        platform: body.platform || 'com.google',
+        source: 'manual_scan',
+      });
+      res.json({
+        success: true,
+        data,
+        message: `Escaneadas ${data.summary.devices_checked} flotas`,
+      });
+    } catch (error) { next(error); }
+  });
+  // Android proves local registration, not whether Google still accepts the
+  // session. needs_reauth is therefore an explicit operator observation.
+  app.put('/api/v1/accounts/:id/verification-state', async (req, res, next) => {
+    try {
+      const state = String((req.body || {}).state || '').trim();
+      if (!['needs_reauth', 'present'].includes(state)) {
+        return res.status(422).json({ success: false, message: 'state debe ser needs_reauth o present' });
+      }
+      const data = await accountInventory.setReviewState(Number(req.params.id), state);
+      res.json({ success: true, data, message: state === 'needs_reauth' ? 'Reinicio de sesión pendiente' : 'Revisión resuelta' });
+    } catch (error) { next(error); }
+  });
+  // A detected swap only updates health. Reassignment requires this explicit
+  // confirmation and a fresh device observation.
+  app.post('/api/v1/accounts/inventory/confirm-swap', async (req, res, next) => {
+    try {
+      const body = req.body || {};
+      if (body.confirm !== true) {
+        return res.status(422).json({ success: false, message: 'confirm=true es requerido' });
+      }
+      const data = await accountInventory.confirmSwap({
+        expected_account_id: Number(body.expected_account_id),
+        observed_email: body.observed_email,
+      });
+      res.json({
+        success: true,
+        data,
+        idempotent_replay: !!data.idempotent,
+        message: data.idempotent ? 'El cambio ya estaba confirmado' : 'Inventario actualizado con el reemplazo confirmado',
+      });
+    } catch (error) { next(error); }
   });
   // Importa inventario por serial ADB exacto. No depende del orden visual.
   app.post('/api/v1/accounts/import-assignments', (req, res) => {
@@ -1616,7 +1698,7 @@ function createServer(db, routerPort, apiToken = '') {
   app.post('/api/v1/accounts/verify-all', async (req, res, next) => {
     try {
       const data = await accountInventory.verifyAll({ platform: (req.body || {}).platform || 'com.google', source: 'manual' });
-      res.json({ success: true, data, message: `Checked ${data.summary.devices_checked} devices; ${data.summary.total_missing} assigned accounts missing` });
+      res.json({ success: true, data, message: `Checked ${data.summary.devices_checked} devices; ${data.summary.total_missing} missing; ${data.summary.total_swapped} swapped; ${data.summary.total_needs_reauth} need sign-in review` });
     } catch (error) { next(error); }
   });
 

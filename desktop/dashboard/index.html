@@ -70,7 +70,8 @@
                                 <!-- El agente vive en el teléfono y es lo que permite leer la pantalla:
                                      sin él los scripts no encuentran los controles. Va aquí, en General,
                                      porque es preparación del dispositivo y no algo de una app concreta. -->
-                                <button class="action-btn" style="grid-column: 1 / -1; font-weight: 700; background: #0f172a; color:#fff; border: 1px solid #334155; padding: 10px; font-size:13px;" onclick="quickAction('INSTALL_AGENT')" title="Instala el Agente Bsolutions en los teléfonos seleccionados, junto con el lector de pantalla y el teclado rápido">🤖 Instalar Agente Bsolutions</button>
+                                <button class="action-btn" style="font-weight: 700; background: #0f172a; color:#fff; border: 1px solid #334155; padding: 10px; font-size:13px;" onclick="quickAction('INSTALL_AGENT')" title="Instala únicamente XSAlpha Agent en los teléfonos seleccionados; no cambia el teclado ni instala lectores de terceros">🤖 Instalar XSAlpha Agent</button>
+                                <button id="agentReadinessBtn" class="action-btn blue" style="font-weight:700; padding:10px; font-size:13px;" onclick="checkAgentReadiness()" title="Solo consulta instalación, versión y estado de accesibilidad; no instala ni cambia el teléfono">🩺 Comprobar XSAlpha</button>
                                 <button class="action-btn purple" style="grid-column: 1 / -1; background: #4f46e5; font-size: 13px; font-weight: 700; padding: 10px;" onclick="promptPlayCustomTrackUrl()" title="Abre Spotify/YouTube y reproduce la canción del enlace que pegues, en los dispositivos seleccionados">🎧 Reproducir canción por enlace ▾</button>
                                 <button class="action-btn purple" onclick="promptOpenApp()" title="Abre una app por su nombre de paquete (ej. com.spotify.music)">🎵 Abrir app ▾</button>
                                 <button class="action-btn purple" onclick="promptCloseApp()" title="Fuerza el cierre de una app por su nombre de paquete">🚪 Cerrar app ▾</button>
@@ -95,10 +96,10 @@
                                 <button class="action-btn blue" onclick="quickAction('INPUT_KEYEVENT', { keycode: 187 })" title="Abre la vista de apps recientes">🗂️ Recientes</button>
                                 <button class="action-btn blue" onclick="quickAction('INPUT_KEYEVENT', { keycode: 24 })" title="Sube el volumen">🔊 Volumen +</button>
                                 <button class="action-btn blue" onclick="quickAction('INPUT_KEYEVENT', { keycode: 25 })" title="Baja el volumen">🔉 Volumen −</button>
-                                <button class="action-btn blue" onclick="quickAction('DEVICE_STABILIZE', { keep_awake: true, screen_timeout_minutes: 30, animation_scale: 0 })" title="Despierta, mantiene encendido y reduce animaciones; verifica cada ajuste">🧰 Estabilizar</button>
+                                <button class="action-btn blue" data-stabilize-action="true" onclick="quickAction('DEVICE_STABILIZE', { keep_awake: true, screen_timeout_minutes: 30, animation_scale: 0 })" title="Despierta, mantiene encendido y reduce animaciones; verifica cada ajuste">🧰 Estabilizar</button>
                                 <button class="action-btn blue" onclick="quickAction('DEVICE_NETWORK_STATUS')" title="Lee proxy, IP local, ruta, fecha, zona horaria y ajustes de pantalla">📡 Diagnóstico red</button>
                                 <button class="action-btn blue" onclick="quickAction('CLEAR_PROXY')" title="Elimina todas las claves del proxy global y verifica conexión directa">🚫 Limpiar proxy</button>
-                                <button class="action-btn blue" style="grid-column: 1 / -1;" onclick="quickAction('SET_TIME_AUTO')" title="Activa hora y zona horaria automáticas (evita relojes desfasados que rompen logins/HTTPS)">🕐 Estabilizar hora y fecha</button>
+                                <button id="stabilizeTimeBtn" class="action-btn blue" data-stabilize-action="true" style="grid-column: 1 / -1;" onclick="quickAction('DEVICE_STABILIZE', { keep_awake: true, screen_timeout_minutes: 30, animation_scale: 0, sync_time: true, clock_source: 'host', max_clock_drift_seconds: 10 })" title="Sincroniza y verifica la hora y zona horaria desde este equipo; muestra el resultado medido y no modifica el proxy">🕐 Sincronizar y verificar hora/fecha</button>
                                 <button class="action-btn" style="grid-column: 1 / -1; background:#dc2626; color:#fff; font-weight:700;" onclick="quickAction('CHECK_BAN')" title="Lee la pantalla y detecta baneo, captcha o verificación">🛡️ Revisar baneo/captcha</button>
                                 <button class="action-btn blue" style="grid-column: 1 / -1;" onclick="quickAction('REBOOT')" title="Reinicia los dispositivos seleccionados">🔄 Reiniciar dispositivos</button>
                             </div>
@@ -438,7 +439,7 @@
     <script src="/dashboard/js/dashboard.js?v=20260725-v8"></script>
     <script src="/dashboard/js/scripts-ui.js?v=20260819-v4"></script>
     <script src="/dashboard/js/fleet-lab-controls.js?v=20260819-v2"></script>
-    <script src="/dashboard/js/anti-idle.js?v=20260823-v2"></script>
+    <script src="/dashboard/js/anti-idle.js?v=20260910-v1"></script>
     <script src="/dashboard/js/routines.js?v=20260725-v8"></script>
     <script src="/dashboard/js/monitor-ui.js?v=20260725-v6"></script>
     <script src="/dashboard/js/views-ui.js?v=20260725-v7"></script>

@@ -1,4 +1,4 @@
-# MCP Agent ProGuard Rules
+# XSAlpha Agent ProGuard Rules
 
 # Keep WebSocket client classes
 -keep class dev.mcp.agent.websocket.** { *; }

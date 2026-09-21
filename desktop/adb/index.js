@@ -96,6 +96,25 @@ function adbStats() { return { active: activeAdb, queued: adbQueue.length, max: 
 function shell(serial, cmd, opts) { return adb(['-s', serial, 'shell', ...cmd], opts); }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// `cmd package query-activities` on Android 9 emits a verbose, indented list:
+//
+//   Activity #0:
+//     priority=0 ...
+//     com.example.app/.MainActivity
+//
+// Keep only real launcher components. Headers, resolver metadata and malformed
+// output are deliberately ignored so a vendor-specific extra line cannot become
+// an app choice in the desktop UI.
+function parseLaunchablePackages(output) {
+  const packages = new Set();
+  for (const rawLine of String(output || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const match = line.match(/^([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+)\/[A-Za-z0-9_.$]+$/);
+    if (match) packages.add(match[1]);
+  }
+  return [...packages].sort((a, b) => a.localeCompare(b));
+}
+
 // Long-running app scripts execute inside this process. Closing the target app
 // alone is not enough to stop them: a warm-up can wake after its current sleep
 // and continue tapping. Keep abort controllers per ADB serial so Stop Task can
@@ -251,7 +270,7 @@ async function abrirTunelDelRouter(serial) {
   limpiarTunelesHuerfanos(serial);
 }
 
-// Comprueba si el teléfono trae el Agente Bsolutions y lo instala si le falta.
+// Comprueba si el teléfono trae el XSAlpha Agent y lo instala si le falta.
 //
 // Sin agente no se puede leer la pantalla, y sin eso ningún script encuentra sus
 // controles: es la diferencia entre un teléfono operativo y uno inerte. Por eso se
@@ -522,7 +541,7 @@ function findFirstActionableBounds(xml, { minY = 250, maxY = 100000, excludeText
   const excluded = String(excludeText || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean);
   const nodes = String(xml || '').match(/<node\b[^>]*>/gi) || [];
   for (const node of nodes) {
-    if (!/clickable="true"/i.test(node) || /enabled="false"/i.test(node)) continue;
+    if (!/clickable="true"/i.test(node) || /enabled="false"/i.test(node) || /visible-to-user="false"/i.test(node)) continue;
     const bounds = node.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/i);
     if (!bounds) continue;
     const x = Math.round((Number(bounds[1]) + Number(bounds[3])) / 2);
@@ -911,77 +930,39 @@ async function execute(serial, command, params) {
         await shell(serial, ['input', 'text', String(p.value ?? '').replace(/ /g, '%s')]);
         return { success: true, message: 'Texto escrito' };
 
-      // ---- AGENTE BSOLUTIONS EN EL DISPOSITIVO ----
-      // Instala el agente propio del proyecto (android-agent -> dev.mcp.agent) y,
-      // si hay alguno compatible con uiautomator2 disponible en el equipo, también,
-      // porque hoy es el único que sabe devolver la jerarquía completa de la
-      // pantalla. Sin esa lectura los scripts no encuentran los controles.
+      // ---- XSALPHA AGENT EN EL DISPOSITIVO ----
+      // The legacy alias remains for saved routines. Both commands install only
+      // the project APK: no third-party readers, IME changes, or auto-uninstall.
       case 'INSTALL_AGENT':
-      case 'TIKTOK_INSTALL_AGENT': {          // nombre antiguo: rutinas guardadas
-        const instalados = [];
-        const fallos = [];
-
-        const instalar = async (ruta, etiqueta, paquete) => {
-          if (!fs.existsSync(ruta)) return false;
-          let out = String(await adb(['-s', serial, 'install', '-r', '-g', ruta], { timeout: 180000 })
-            .catch(e => e.message || ''));
-
-          // Firma distinta a la del APK ya instalado: Android no deja actualizar
-          // encima. Hay que desinstalar, y eso revoca el permiso de accesibilidad,
-          // así que se avisa en el resultado para que el operador lo reactive.
-          if (/signatures do not match|INSTALL_FAILED_UPDATE_INCOMPATIBLE/i.test(out) && paquete) {
-            await adb(['-s', serial, 'uninstall', paquete], { timeout: 60000 }).catch(() => {});
-            out = String(await adb(['-s', serial, 'install', '-r', '-g', ruta], { timeout: 180000 })
-              .catch(e => e.message || ''));
-            if (/Success/i.test(out)) {
-              instalados.push(`${etiqueta} (reinstalado: reactiva su permiso de accesibilidad)`);
-              return true;
-            }
-          }
-
-          if (/Success/i.test(out)) { instalados.push(etiqueta); return true; }
-          fallos.push(`${etiqueta}: ${explainInstallError(out)}`);
-          return false;
+      case 'TIKTOK_INSTALL_AGENT': {
+        const r = await agent.instalarAhora(serial);
+        const data = {
+          accion: r.accion,
+          paquete: r.paquete || null,
+          version: r.version || null,
+          accesibilidad: !!r.accesibilidad,
+          accesibilidad_vinculada: !!r.accesibilidad_vinculada,
+          ui_automation_activa: !!r.ui_automation_activa,
+          listo: !!r.listo,
+          aprovisionado: !!r.aprovisionado,
         };
-
-        // 1. Agente Bsolutions (el de este repositorio).
-        const propio = [
-          CONFIG.agentApkPath,
-          app_ruta_recurso('agent', 'mcp-agent.apk'),
-          path.resolve(__dirname, '..', '..', 'android-agent', 'mcp-agent-debug.apk'),
-        ].filter(Boolean).find(r => { try { return fs.existsSync(r); } catch (_) { return false; } });
-
-        if (propio) {
-          // El paquete lleva sufijo .debug en la compilación de depuración; se
-          // intenta desinstalar el que corresponda si hubiera choque de firmas.
-          const yaInstalados = String(await shell(serial, ['pm', 'list', 'packages']).catch(() => ''));
-          const paqueteExistente = ['dev.mcp.agent.debug', 'dev.mcp.agent']
-            .find(pk => yaInstalados.includes(`package:${pk}`)) || 'dev.mcp.agent.debug';
-          await instalar(propio, 'Agente Bsolutions', paqueteExistente);
-        } else {
-          fallos.push('no se encontró el APK del Agente Bsolutions');
+        if (r.accion === 'instalado' || r.accion === 'actualizado') {
+          const access = !r.accesibilidad
+            ? 'open XSAlpha Agent and enable it in Android Accessibility settings'
+            : r.ui_automation_activa
+              ? 'enabled but paused while an external UiAutomation session owns screen access'
+              : r.accesibilidad_vinculada
+                ? 'accessibility active'
+                : 'enabled but not bound; toggle XSAlpha Agent accessibility off and on';
+          return {
+            success: true,
+            message: 'XSAlpha Agent ' + r.accion + ': ' + (r.version || r.paquete || 'available') + ' - ' + access,
+            data,
+          };
         }
-
-        // 2. Lector de UI compatible con uiautomator2, si está disponible.
-        const appData = process.env.APPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming');
-        for (const [archivo, etiqueta] of [
-          ['com.github.tikmatrix.apk', 'lector de UI'],
-          ['com.github.tikmatrix.test.apk', 'lector de UI (instrumentación)'],
-        ]) {
-          await instalar(path.join(appData, 'com.tikmatrix', 'bin', archivo), etiqueta);
-        }
-
-        // Teclado rápido: escribe sin abrir el teclado del sistema.
-        await shell(serial, ['ime', 'enable', 'com.github.tikmatrix/.FastInputIME']).catch(() => {});
-        await shell(serial, ['ime', 'set', 'com.github.tikmatrix/.FastInputIME']).catch(() => {});
-
-        return {
-          success: instalados.length > 0,
-          message: instalados.length
-            ? `Instalado en el dispositivo: ${instalados.join(', ')}${fallos.length ? ` · pendiente: ${fallos.join('; ')}` : ''}`
-            : `No se pudo instalar ningún agente. ${fallos.join('; ')}`,
-          data: { instalados, fallos },
-        };
+        if (r.accion === 'sin_apk') return { success: false, message: r.motivo, data };
+        if (r.accion === 'fallo') return { success: false, message: 'Agent was not installed: ' + r.motivo, data };
+        return { success: false, message: 'Install skipped: ' + (r.motivo || r.accion), data };
       }
 
       // Estado del agente en el teléfono: si está, con qué versión, y si su
@@ -993,10 +974,13 @@ async function execute(serial, command, params) {
         if (!e.instalado) partes.push('agente NO instalado');
         else {
           partes.push(`agente ${e.version || 'instalado'} (${e.paquete})`);
-          partes.push(e.accesibilidad ? 'accesibilidad activa' : 'accesibilidad DESACTIVADA');
+          if (!e.accesibilidad) partes.push('accesibilidad DESACTIVADA');
+          else if (e.ui_automation_activa) partes.push('accesibilidad habilitada, bloqueada por una sesión UiAutomation externa');
+          else if (!e.accesibilidad_vinculada) partes.push('accesibilidad habilitada, servicio sin vincular');
+          else partes.push('accesibilidad activa y vinculada');
         }
         return {
-          success: !!e.instalado && e.accesibilidad,
+          success: !!e.listo,
           message: partes.join(' · '),
           data: e,
         };
@@ -1305,14 +1289,36 @@ async function execute(serial, command, params) {
 
       // Comprueba cuáles de los paquetes indicados están instalados.
       case 'LIST_PACKAGES': {
-        const wanted = Array.isArray(p.packages) ? p.packages.map(String) : [];
+        const wanted = [...new Set(Array.isArray(p.packages)
+          ? p.packages.map(String).map(value => value.trim()).filter(Boolean)
+          : [])];
         const out = await shell(serial, ['pm', 'list', 'packages']);
         const present = new Set(String(out).split(/\r?\n/).map(l => l.replace(/^package:/, '').trim()).filter(Boolean));
         const installed = wanted.filter(pkg => present.has(pkg));
+        let launchable = [];
+        let launchableScanOk = true;
+        if (p.discover_launchable === true) {
+          try {
+            const activities = await shell(serial, [
+              'cmd', 'package', 'query-activities', '--brief',
+              '-a', 'android.intent.action.MAIN',
+              '-c', 'android.intent.category.LAUNCHER',
+            ]);
+            launchable = parseLaunchablePackages(activities);
+          } catch (_) {
+            launchableScanOk = false;
+          }
+        }
         return {
-          success: true,
-          message: `${installed.length}/${wanted.length} instaladas`,
-          data: { installed, missing: wanted.filter(pkg => !present.has(pkg)) },
+          success: launchableScanOk,
+          message: launchableScanOk
+            ? `${installed.length}/${wanted.length} solicitadas instaladas${p.discover_launchable === true ? `; ${launchable.length} apps ejecutables encontradas` : ''}`
+            : 'No se pudo consultar la lista de apps ejecutables',
+          data: {
+            installed,
+            missing: wanted.filter(pkg => !present.has(pkg)),
+            ...(p.discover_launchable === true ? { launchable, launchable_scan_ok: launchableScanOk } : {}),
+          },
         };
       }
 
@@ -1848,4 +1854,8 @@ function stop() {
   }
 }
 
-module.exports = { start, stop, has, execute, cancel, captureFrame, connectTcp, scanRange, live, adbStats, resolveAdb };
+module.exports = {
+  start, stop, has, execute, cancel, captureFrame, connectTcp, scanRange,
+  live, adbStats, resolveAdb,
+  _parseLaunchablePackages: parseLaunchablePackages,
+};

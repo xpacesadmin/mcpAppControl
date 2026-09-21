@@ -1,8 +1,13 @@
 const crypto = require('crypto');
 const { now } = require('./db');
 const labControl = require('./lab_control');
+const automationRuntime = require('./automation_runtime');
 
-const DEFAULT_PACKAGES = ['com.android.settings', 'com.android.vending', 'com.google.android.gm'];
+const DEFAULT_PACKAGES = ['com.google.android.gm', 'com.google.android.youtube', 'com.zhiliaoapp.musically'];
+const VIDEO_DWELL_PACKAGES = new Set([
+  'com.zhiliaoapp.musically',
+  'com.ss.android.ugc.trill',
+]);
 const PACKAGE_RE = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
 let DB = null;
 let DISPATCH = null;
@@ -21,6 +26,24 @@ function safeJson(value, fallback) {
   if (typeof value !== 'string') return value;
   try { return JSON.parse(value); } catch (_) { return fallback; }
 }
+function ensureRuntimeColumns() {
+  const columns = new Set(DB.all('PRAGMA table_info(anti_idle_state)').map(column => column.name));
+  if (!columns.has('pacing_preset')) {
+    DB.run("ALTER TABLE anti_idle_state ADD COLUMN pacing_preset TEXT NOT NULL DEFAULT 'standard'");
+  }
+  if (!columns.has('lock_portrait')) {
+    DB.run('ALTER TABLE anti_idle_state ADD COLUMN lock_portrait INTEGER NOT NULL DEFAULT 1');
+  }
+  if (!columns.has('package_cursor')) {
+    DB.run('ALTER TABLE anti_idle_state ADD COLUMN package_cursor INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!columns.has('scrolls_before_dwell')) {
+    DB.run('ALTER TABLE anti_idle_state ADD COLUMN scrolls_before_dwell INTEGER NOT NULL DEFAULT 3');
+  }
+  if (!columns.has('video_dwell_seconds')) {
+    DB.run('ALTER TABLE anti_idle_state ADD COLUMN video_dwell_seconds INTEGER NOT NULL DEFAULT 180');
+  }
+}
 function init(db, options = {}) {
   if (DB === db && DISPATCH) return state();
   DB = db;
@@ -29,11 +52,13 @@ function init(db, options = {}) {
   SLEEP = options.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
   RUN_PROMISE = null;
   ready();
+  ensureRuntimeColumns();
   DB.run(
     `INSERT OR IGNORE INTO anti_idle_state(
-      id,enabled,running,device_ids,package_names,interval_seconds,
-      action_duration_seconds,gesture_interval_seconds,updated_at
-    ) VALUES (1,0,0,'[]',?,480,45,4,?)`,
+      id,enabled,running,device_ids,package_names,package_cursor,interval_seconds,
+      action_duration_seconds,gesture_interval_seconds,scrolls_before_dwell,video_dwell_seconds,
+      pacing_preset,lock_portrait,updated_at
+    ) VALUES (1,0,0,'[]',?,0,480,45,4,3,180,'standard',1,?)`,
     [JSON.stringify(DEFAULT_PACKAGES), now()]
   );
   const previous = DB.get('SELECT enabled,running FROM anti_idle_state WHERE id=1');
@@ -48,15 +73,30 @@ function init(db, options = {}) {
   return state();
 }
 function publicState(row) {
-  return row && {
+  if (!row) return row;
+  const packageNames = safeJson(row.package_names, DEFAULT_PACKAGES);
+  const rawCursor = Number.isInteger(Number(row.package_cursor)) ? Number(row.package_cursor) : 0;
+  const packageCursor = packageNames.length ? ((rawCursor % packageNames.length) + packageNames.length) % packageNames.length : 0;
+  const pacing = automationRuntime.normalizeExecutionOptions({
+    pace: row.pacing_preset || 'standard',
+    lock_portrait: row.lock_portrait !== 0,
+  });
+  return {
     enabled: !!row.enabled,
     running: !!row.running,
     device_ids: safeJson(row.device_ids, []),
-    package_names: safeJson(row.package_names, DEFAULT_PACKAGES),
+    package_names: packageNames,
+    package_cursor: packageCursor,
+    selected_package: packageNames[packageCursor] || null,
     interval_seconds: Number(row.interval_seconds),
     action_duration_seconds: Number(row.action_duration_seconds),
     gesture_interval_seconds: Number(row.gesture_interval_seconds),
+    scrolls_before_dwell: Number(row.scrolls_before_dwell),
+    video_dwell_seconds: Number(row.video_dwell_seconds),
     natural_scrolls_enabled: row.natural_scrolls_enabled !== 0,
+    pace: pacing.pace,
+    action_settle_ms: pacing.action_settle_ms,
+    lock_portrait: pacing.lock_portrait,
     last_run_at: row.last_run_at || null,
     next_run_at: row.next_run_at || null,
     last_result: safeJson(row.last_result, null),
@@ -85,10 +125,17 @@ function timingOf(input = {}) {
   const interval = Number(input.interval_seconds ?? 480);
   const duration = Number(input.action_duration_seconds ?? 45);
   const gesture = Number(input.gesture_interval_seconds ?? 4);
+  const scrollsBeforeDwell = Number(input.scrolls_before_dwell ?? 3);
+  const videoDwellSeconds = Number(input.video_dwell_seconds ?? 180);
   if (!Number.isInteger(interval) || interval < 60 || interval > 3600) throw new Error('interval_seconds fuera de rango');
   if (!Number.isInteger(duration) || duration < 10 || duration > 300) throw new Error('action_duration_seconds fuera de rango');
   if (!Number.isInteger(gesture) || gesture < 2 || gesture > 15) throw new Error('gesture_interval_seconds fuera de rango');
-  return { interval, duration, gesture, naturalScrolls: input.natural_scrolls_enabled !== false };
+  if (!Number.isInteger(scrollsBeforeDwell) || scrollsBeforeDwell < 1 || scrollsBeforeDwell > 20) throw new Error('scrolls_before_dwell fuera de rango');
+  if (!Number.isInteger(videoDwellSeconds) || videoDwellSeconds < 0 || videoDwellSeconds > 600) throw new Error('video_dwell_seconds fuera de rango');
+  return {
+    interval, duration, gesture, scrollsBeforeDwell, videoDwellSeconds,
+    naturalScrolls: input.natural_scrolls_enabled !== false,
+  };
 }
 function targets(deviceIds, requireOnline = true) {
   const ids = [...new Set((Array.isArray(deviceIds) ? deviceIds : []).map(Number))];
@@ -128,16 +175,24 @@ function configure(input = {}) {
   const deviceIds = targets(input.device_ids).map(device => Number(device.id));
   const packages = packagesOf(input.package_names || DEFAULT_PACKAGES);
   const timing = timingOf(input);
+  const pacing = automationRuntime.normalizeExecutionOptions({
+    pace: input.pace ?? input.pacing_preset ?? current.pace,
+    lock_portrait: input.lock_portrait ?? current.lock_portrait,
+  });
   DB.run(
-    `UPDATE anti_idle_state SET device_ids=?,package_names=?,interval_seconds=?,action_duration_seconds=?,
-     gesture_interval_seconds=?,natural_scrolls_enabled=?,last_error=NULL,updated_at=? WHERE id=1`,
+    `UPDATE anti_idle_state SET device_ids=?,package_names=?,package_cursor=0,interval_seconds=?,action_duration_seconds=?,
+     gesture_interval_seconds=?,scrolls_before_dwell=?,video_dwell_seconds=?,natural_scrolls_enabled=?,
+     pacing_preset=?,lock_portrait=?,last_error=NULL,updated_at=? WHERE id=1`,
     [JSON.stringify(deviceIds), JSON.stringify(packages), timing.interval, timing.duration,
-      timing.gesture, timing.naturalScrolls ? 1 : 0, now()]
+      timing.gesture, timing.scrollsBeforeDwell, timing.videoDwellSeconds, timing.naturalScrolls ? 1 : 0,
+      pacing.pace, pacing.lock_portrait ? 1 : 0, now()]
   );
   labControl.audit('anti_idle.configure', 'ok', {
     device_ids: deviceIds, package_names: packages, interval_seconds: timing.interval,
     action_duration_seconds: timing.duration, gesture_interval_seconds: timing.gesture,
-    natural_scrolls_enabled: timing.naturalScrolls,
+    scrolls_before_dwell: timing.scrollsBeforeDwell, video_dwell_seconds: timing.videoDwellSeconds,
+    natural_scrolls_enabled: timing.naturalScrolls, pace: pacing.pace,
+    lock_portrait: pacing.lock_portrait, selected_package: packages[0],
   }, input);
   return state();
 }
@@ -149,7 +204,11 @@ function start(input = {}) {
   targets(current.device_ids);
   const first = input.run_immediately === false ? CLOCK() + current.interval_seconds * 1000 : CLOCK();
   DB.run('UPDATE anti_idle_state SET enabled=1,running=0,next_run_at=?,last_error=NULL,updated_at=? WHERE id=1', [isoAt(first), now()]);
-  labControl.audit('anti_idle.start', 'ok', { device_ids: current.device_ids, run_immediately: input.run_immediately !== false }, input);
+  labControl.audit('anti_idle.start', 'ok', {
+    device_ids: current.device_ids,
+    selected_package: current.selected_package,
+    run_immediately: input.run_immediately !== false,
+  }, input);
   setImmediate(() => tick().catch(error => console.error('[anti-idle]', error.message)));
   return state();
 }
@@ -174,35 +233,94 @@ async function wait(ms, runId) {
   }
   return active(runId);
 }
-async function runDevice(device, config, runId) {
-  const end = CLOCK() + config.action_duration_seconds * 1000;
-  let packageIndex = Number(device.id) % config.package_names.length;
-  let direction = Number(device.id) % 2 ? 'down' : 'up';
-  let actionIndex = 0, appSwitches = 0, gestures = 0, failures = 0, cancelled = false;
-  while (CLOCK() < end) {
-    if (!active(runId)) { cancelled = true; break; }
-    if (actionIndex % 2 === 0) {
-      const packageName = config.package_names[packageIndex++ % config.package_names.length];
+async function runDevice(device, config, runId, packageName) {
+  const activeUntil = CLOCK() + config.action_duration_seconds * 1000;
+  let appSwitches = 0, gestures = 0, dwellCount = 0, failures = 0, cancelled = false;
+  let orientationPrevious = null;
+  let orientationRestored = !config.lock_portrait;
+
+  try {
+    if (config.lock_portrait) {
+      try {
+        orientationPrevious = await automationRuntime.beginPortraitGuard(DISPATCH, device.serial_number);
+      } catch (_) {
+        failures++;
+        return {
+          device_id: Number(device.id), selected_package: packageName,
+          app_switches: 0, gestures: 0, dwell_count: 0,
+          failures, cancelled: false, orientation_restored: false,
+        };
+      }
+    }
+
+    if (!active(runId)) {
+      cancelled = true;
+    } else {
       const opened = await DISPATCH(device.serial_number, 'OPEN_APP', { package_name: packageName });
       opened && opened.success ? appSwitches++ : failures++;
-      if (!active(runId)) { cancelled = true; break; }
+      if (!active(runId)) cancelled = true;
+      const remainingAfterOpen = activeUntil - CLOCK();
+      if (!cancelled && opened && opened.success && remainingAfterOpen > 0 &&
+          !await wait(Math.min(config.action_settle_ms, remainingAfterOpen), runId)) {
+        cancelled = true;
+      }
+
+      if (!cancelled && opened && opened.success && !config.natural_scrolls_enabled) {
+        const remaining = activeUntil - CLOCK();
+        if (remaining > 0 && !await wait(remaining, runId)) cancelled = true;
+      }
+
+      if (!cancelled && opened && opened.success && config.natural_scrolls_enabled) {
+        const videoDwell = VIDEO_DWELL_PACKAGES.has(packageName);
+        let successfulScrolls = 0;
+        while (CLOCK() < activeUntil) {
+          if (!active(runId)) { cancelled = true; break; }
+          // ADB's `down` direction is a physical bottom-to-top swipe: forward/next content.
+          const scrolled = await DISPATCH(device.serial_number, 'SCROLL', { direction: 'down' });
+          if (scrolled && scrolled.success) {
+            gestures++;
+            successfulScrolls++;
+          } else {
+            failures++;
+          }
+          if (videoDwell && successfulScrolls >= config.scrolls_before_dwell) {
+            if (config.video_dwell_seconds > 0) {
+              if (await wait(config.video_dwell_seconds * 1000, runId)) dwellCount++;
+              else cancelled = true;
+            }
+            break;
+          }
+          const remaining = activeUntil - CLOCK();
+          if (remaining <= 0) break;
+          if (!await wait(Math.min(config.gesture_interval_seconds * 1000, remaining), runId)) {
+            cancelled = true;
+            break;
+          }
+        }
+      }
     }
-    if (config.natural_scrolls_enabled) {
-      const scrolled = await DISPATCH(device.serial_number, 'SCROLL', { direction });
-      scrolled && scrolled.success ? gestures++ : failures++;
-      direction = direction === 'down' ? 'up' : 'down';
+  } finally {
+    if (orientationPrevious) {
+      try {
+        await automationRuntime.restoreOrientation(DISPATCH, device.serial_number, orientationPrevious);
+        orientationRestored = true;
+      } catch (_) {
+        failures++;
+        orientationRestored = false;
+      }
     }
-    actionIndex++;
-    const remaining = end - CLOCK();
-    if (remaining <= 0) break;
-    if (!await wait(Math.min(config.gesture_interval_seconds * 1000, remaining), runId)) { cancelled = true; break; }
   }
-  return { device_id: Number(device.id), app_switches: appSwitches, gestures, failures, cancelled };
+  return {
+    device_id: Number(device.id), selected_package: packageName,
+    app_switches: appSwitches, gestures, dwell_count: dwellCount,
+    failures, cancelled, orientation_restored: orientationRestored,
+  };
 }
 async function cycle(trigger = 'scheduled') {
   const config = state();
   if (!config.enabled) return { accepted: false, reason: 'disabled' };
   const runId = crypto.randomUUID();
+  const selectedPackage = config.selected_package;
   let devices;
   try { devices = targets(config.device_ids, false); }
   catch (error) {
@@ -213,17 +331,28 @@ async function cycle(trigger = 'scheduled') {
   const runnable = devices.filter(device => device.status === 'online' && device.current_task_id == null);
   DB.run('UPDATE anti_idle_state SET running=1,active_run_id=?,last_run_at=?,last_error=NULL,updated_at=? WHERE id=1', [runId, now(), now()]);
   try {
-    const results = await Promise.all(runnable.map(device => runDevice(device, config, runId)));
+    const results = await Promise.all(runnable.map(device => runDevice(device, config, runId, selectedPackage)));
+    const remainsEnabled = state().enabled && !labControl.state().halted;
+    const completed = runnable.length > 0 && results.every(result => !result.cancelled);
+    const nextCursor = remainsEnabled && completed
+      ? (config.package_cursor + 1) % config.package_names.length
+      : config.package_cursor;
     const summary = {
-      trigger, targeted: devices.length, executed: runnable.length,
+      trigger, selected_package: selectedPackage,
+      package_cursor_before: config.package_cursor, package_cursor_after: nextCursor,
+      scrolls_before_dwell: config.scrolls_before_dwell,
+      video_dwell_seconds: config.video_dwell_seconds,
+      targeted: devices.length, executed: runnable.length,
       skipped_busy_or_offline: devices.length - runnable.length,
       app_switches: results.reduce((sum, result) => sum + result.app_switches, 0),
       gestures: results.reduce((sum, result) => sum + result.gestures, 0),
+      dwell_count: results.reduce((sum, result) => sum + result.dwell_count, 0),
       failures: results.reduce((sum, result) => sum + result.failures, 0),
       cancelled: results.filter(result => result.cancelled).length,
+      orientation_restore_failures: results.filter(result => !result.orientation_restored).length,
     };
-    const next = state().enabled ? isoAt(CLOCK() + config.interval_seconds * 1000) : null;
-    DB.run('UPDATE anti_idle_state SET running=0,active_run_id=NULL,last_result=?,next_run_at=?,updated_at=? WHERE id=1', [JSON.stringify(summary), next, now()]);
+    const next = remainsEnabled ? isoAt(CLOCK() + config.interval_seconds * 1000) : null;
+    DB.run('UPDATE anti_idle_state SET running=0,active_run_id=NULL,last_result=?,next_run_at=?,package_cursor=?,updated_at=? WHERE id=1', [JSON.stringify(summary), next, nextCursor, now()]);
     labControl.audit('anti_idle.cycle', summary.failures ? 'partial' : 'ok', summary, {});
     return { accepted: true, summary, state: state() };
   } catch (error) {

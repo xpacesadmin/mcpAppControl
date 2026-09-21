@@ -131,7 +131,8 @@ class MainActivity : Activity() {
         prefs.edit().apply {
             if (!servidor.isNullOrEmpty()) putString("server_url", servidor)
             if (!serial.isNullOrEmpty()) putString("serial_number", serial)
-            putBoolean("auto_connect", true)
+            // Local ADB control is ready without enabling the WebSocket/Hermes connector.
+            putBoolean("auto_connect", false)
             apply()
         }
         Log.i("MainActivity", "Aprovisionado desde el escritorio: servidor=$servidor serial=$serial")
@@ -207,8 +208,8 @@ class MainActivity : Activity() {
 
         if (requestCode == ACCESSIBILITY_SETTINGS_REQUEST_CODE) {
             checkAccessibilityStatus()
-            if (accessibilityEnabled && !MCPForegroundService.isRunning) {
-                startAgentService()
+            if (accessibilityEnabled) {
+                addLogEntry("Accessibility active; local ADB control ready")
             }
         }
     }
@@ -220,11 +221,17 @@ class MainActivity : Activity() {
         }
 
         val prefs = getSharedPreferences("mcp_agent_prefs", MODE_PRIVATE)
+        val token = prefs.getString("auth_token", "").orEmpty().trim()
+        if (token.isBlank()) {
+            Toast.makeText(this, "Conector no configurado; control local ADB listo", Toast.LENGTH_LONG).show()
+            addLogEntry("Conector bloqueado: falta configurar token")
+            return
+        }
         val intent = Intent(this, MCPForegroundService::class.java).apply {
             action = MCPForegroundService.ACTION_START_AGENT
             putExtra(MCPForegroundService.EXTRA_SERVER_URL, prefs.getString("server_url", DEFAULT_SERVER_URL))
             putExtra(MCPForegroundService.EXTRA_SERIAL, currentSerialNumber())
-            putExtra(MCPForegroundService.EXTRA_TOKEN, prefs.getString("auth_token", ""))
+            putExtra(MCPForegroundService.EXTRA_TOKEN, token)
         }
         ContextCompat.startForegroundService(this, intent)
         updateAgentButton()
@@ -253,7 +260,7 @@ class MainActivity : Activity() {
 
     private fun updateAgentButton() {
         btnToggleAgent.text = when {
-            !MCPForegroundService.isRunning -> "Conectar agente"
+            !MCPForegroundService.isRunning -> "Conectar al orquestador"
             MCPForegroundService.isConnected -> "Desconectar agente"
             else -> "Reintentar conexion"
         }

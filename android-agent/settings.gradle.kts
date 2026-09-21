@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "MCP Agent"
+rootProject.name = "XSAlpha Agent"
 include(":app")

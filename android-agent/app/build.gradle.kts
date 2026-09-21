@@ -11,8 +11,8 @@ android {
         applicationId = "dev.mcp.agent"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "2.0"
+        versionCode = 4
+        versionName = "2.1.2-lab"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -26,18 +26,18 @@ android {
     // clave propia: al hacerlo, los teléfonos con la versión anterior necesitarán
     // desinstalar antes de actualizar, porque la firma no coincidirá.
     signingConfigs {
-        create("interna") {
-            storeFile = file(System.getProperty("user.home") + "/.android/debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+        getByName("debug") {
+            val taskKeystore = System.getenv("XSALPHA_AGENT_KEYSTORE")
+            if (!taskKeystore.isNullOrBlank()) storeFile = file(taskKeystore)
         }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = true
-            signingConfig = signingConfigs.getByName("interna")
+            // Lab builds deliberately reuse Gradle's standard debug signing
+            // configuration. No keystore password or private key is committed.
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -45,6 +45,7 @@ android {
         }
         debug {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
         }

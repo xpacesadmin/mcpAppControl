@@ -511,18 +511,23 @@ class MCPAccessibilityService : AccessibilityService() {
     private fun escribirNodo(nodo: AccessibilityNodeInfo, sb: StringBuilder, indice: Int) {
         val r = android.graphics.Rect()
         nodo.getBoundsInScreen(r)
+        val textoPropio = if (nodo.isPassword) "" else nodo.text?.toString().orEmpty()
+        val descripcionPropia = if (nodo.isPassword) "" else nodo.contentDescription?.toString().orEmpty()
+        val textoAccionable = if (nodo.isClickable && textoPropio.isBlank() && descripcionPropia.isBlank())
+            primeraEtiquetaDescendiente(nodo) else ""
 
         sb.append("<node")
         sb.append(" index=\"").append(indice).append('"')
-        sb.append(" text=\"").append(escapar(nodo.text?.toString())).append('"')
+        sb.append(" text=\"").append(escapar(textoPropio.ifBlank { textoAccionable })).append('"')
         sb.append(" resource-id=\"").append(escapar(nodo.viewIdResourceName)).append('"')
         sb.append(" class=\"").append(escapar(nodo.className?.toString())).append('"')
         sb.append(" package=\"").append(escapar(nodo.packageName?.toString())).append('"')
-        sb.append(" content-desc=\"").append(escapar(nodo.contentDescription?.toString())).append('"')
+        sb.append(" content-desc=\"").append(escapar(descripcionPropia)).append('"')
         sb.append(" checkable=\"").append(nodo.isCheckable).append('"')
         sb.append(" checked=\"").append(nodo.isChecked).append('"')
         sb.append(" clickable=\"").append(nodo.isClickable).append('"')
         sb.append(" enabled=\"").append(nodo.isEnabled).append('"')
+        sb.append(" visible-to-user=\"").append(nodo.isVisibleToUser).append('"')
         sb.append(" focusable=\"").append(nodo.isFocusable).append('"')
         sb.append(" focused=\"").append(nodo.isFocused).append('"')
         sb.append(" scrollable=\"").append(nodo.isScrollable).append('"')
@@ -542,6 +547,20 @@ class MCPAccessibilityService : AccessibilityService() {
             nodo.getChild(i)?.let { escribirNodo(it, sb, i) }
         }
         sb.append("</node>\n")
+    }
+
+    private fun primeraEtiquetaDescendiente(nodo: AccessibilityNodeInfo, profundidad: Int = 0): String {
+        if (profundidad >= 3) return ""
+        for (i in 0 until nodo.childCount) {
+            val hijo = nodo.getChild(i) ?: continue
+            if (hijo.isPassword || !hijo.isVisibleToUser) continue
+            val etiqueta = hijo.text?.toString()?.trim().orEmpty()
+                .ifBlank { hijo.contentDescription?.toString()?.trim().orEmpty() }
+            if (etiqueta.isNotBlank()) return etiqueta.take(160)
+            val anidada = primeraEtiquetaDescendiente(hijo, profundidad + 1)
+            if (anidada.isNotBlank()) return anidada
+        }
+        return ""
     }
 
     private fun escapar(valor: String?): String {

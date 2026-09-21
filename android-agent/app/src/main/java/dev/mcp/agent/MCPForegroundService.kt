@@ -128,7 +128,7 @@ class MCPForegroundService : Service() {
         }
 
         return builder
-            .setContentTitle("MCP Agent Activo")
+            .setContentTitle("XSAlpha Agent Activo")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setOngoing(true)
@@ -145,7 +145,7 @@ class MCPForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "MCP Agent Channel",
+                "XSAlpha Agent Channel",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "Canal para notificación del agente MCP"

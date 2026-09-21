@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS workflows (
   steps TEXT,
   allowed_package TEXT,
   parameter_schema TEXT DEFAULT '[]',
+  execution_options TEXT DEFAULT '{}',
   status TEXT DEFAULT 'draft',
   created_by INTEGER,
   created_at TEXT,
@@ -307,9 +308,12 @@ CREATE TABLE IF NOT EXISTS anti_idle_state (
   running INTEGER NOT NULL DEFAULT 0,
   device_ids TEXT NOT NULL DEFAULT '[]',
   package_names TEXT NOT NULL DEFAULT '[]',
+  package_cursor INTEGER NOT NULL DEFAULT 0,
   interval_seconds INTEGER NOT NULL DEFAULT 480,
   action_duration_seconds INTEGER NOT NULL DEFAULT 45,
   gesture_interval_seconds INTEGER NOT NULL DEFAULT 4,
+  scrolls_before_dwell INTEGER NOT NULL DEFAULT 3,
+  video_dwell_seconds INTEGER NOT NULL DEFAULT 180,
   natural_scrolls_enabled INTEGER NOT NULL DEFAULT 1,
   active_run_id TEXT,
   last_run_at TEXT,
@@ -560,10 +564,14 @@ const ACCOUNT_COLUMNS = {
 
 const ANTI_IDLE_COLUMNS = {
   natural_scrolls_enabled: 'INTEGER NOT NULL DEFAULT 1',
+  package_cursor: 'INTEGER NOT NULL DEFAULT 0',
+  scrolls_before_dwell: 'INTEGER NOT NULL DEFAULT 3',
+  video_dwell_seconds: 'INTEGER NOT NULL DEFAULT 180',
 };
 
 const WORKFLOW_COLUMNS = {
   parameter_schema: "TEXT DEFAULT '[]'",
+  execution_options: "TEXT DEFAULT '{}'",
 };
 
 function now() {

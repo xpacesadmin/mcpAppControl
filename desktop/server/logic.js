@@ -6,12 +6,24 @@ const http = require('http');
 const crypto = require('crypto');
 const { now } = require('./db');
 const labControl = require('./lab_control');
+const automationRuntime = require('./automation_runtime');
 
 let DB = null;
 let ROUTER_PORT = 6011;
-function init(db, routerPort) { DB = db; ROUTER_PORT = routerPort; labControl.init(db); }
+let ROUTER_DISPATCH_OVERRIDE = null;
+let SLEEP_OVERRIDE = null;
+function init(db, routerPort, options = {}) {
+  DB = db;
+  ROUTER_PORT = routerPort;
+  ROUTER_DISPATCH_OVERRIDE = typeof options.dispatch === 'function' ? options.dispatch : null;
+  SLEEP_OVERRIDE = typeof options.sleep === 'function' ? options.sleep : null;
+  labControl.init(db);
+}
 
-const sleep = ms => new Promise(r => setTimeout(r, Math.min(ms, 120000)));
+const sleep = ms => {
+  const bounded = Math.min(Math.max(0, Number(ms) || 0), 120000);
+  return SLEEP_OVERRIDE ? Promise.resolve(SLEEP_OVERRIDE(bounded)) : new Promise(r => setTimeout(r, bounded));
+};
 const uuid = () => crypto.randomUUID();
 
 function taskStopReason(taskId) {
@@ -102,6 +114,11 @@ function dispatchTimeout(command) {
 }
 
 function routerDispatch(serial, command, params) {
+  if (ROUTER_DISPATCH_OVERRIDE) {
+    return Promise.resolve()
+      .then(() => ROUTER_DISPATCH_OVERRIDE(serial, command, params || {}))
+      .catch(error => ({ success: false, message: `router: ${error.message}` }));
+  }
   return new Promise((resolve) => {
     const body = JSON.stringify({ serial_number: serial, command, params: params || {} });
     const req = http.request({ host: '127.0.0.1', port: ROUTER_PORT, path: '/command/dispatch', method: 'POST',
@@ -174,7 +191,8 @@ async function executeStep(device, step, runtime = {}) {
           const rr = await routerDispatch(device.serial_number, 'READ_SCREEN_TEXT', {});
           const txt = (rr && rr.data && rr.data.text || '').toLowerCase();
           if (needle && txt.includes(needle)) return { success: true, message: `Texto encontrado: "${step.text}"`, data: null };
-          await sleep(700);
+          const paused = await cancellableDelay(runtime.taskId, 700);
+          if (!paused.success) return paused;
         }
         return { success: false, message: `Timeout esperando texto: "${step.text}"`, data: null };
       }
@@ -295,15 +313,21 @@ function selectDevices({ groupId = null, deviceIds = null, workflowId = null }) 
 }
 
 // ---- dispatcher: ejecuta una rutina sobre dispositivos ----
-async function dispatchWorkflow(workflow, { groupId = null, deviceIds = null, params = {} } = {}) {
+async function dispatchWorkflow(workflow, { groupId = null, deviceIds = null, params = {}, executionOptions = null } = {}) {
   let control;
   try { control = labControl.assertOperational(); }
   catch (error) { return { task: null, devices_assigned: 0, message: error.message }; }
   if (!workflow || workflow.status !== 'active') return { task: null, devices_assigned: 0, message: 'La rutina debe estar activa' };
+  const storedExecutionOptions = params && params.__execution_options;
+  const requestedExecutionOptions = executionOptions || storedExecutionOptions || {};
+  let executionConfig;
+  try { executionConfig = automationRuntime.normalizeExecutionOptions(requestedExecutionOptions); }
+  catch (error) { return { task: null, devices_assigned: 0, message: error.message }; }
   const parameterSchema = safeJson(workflow.parameter_schema, []);
   const checkedParams = validateRoutineParams(parameterSchema, params || {});
   if (!checkedParams.valid) return { task: null, devices_assigned: 0, message: checkedParams.errors.join('; ') };
   const resolvedParams = { ...(params || {}), ...checkedParams.params };
+  delete resolvedParams.__execution_options;
   const steps = resolveRoutineVars(safeJson(workflow.steps, []), resolvedParams);
   if (control.lab_mode_enabled) {
     const validation = labControl.validateWorkflowSteps(steps);
@@ -327,8 +351,9 @@ async function dispatchWorkflow(workflow, { groupId = null, deviceIds = null, pa
   if (!devices.length) return { task: null, devices_assigned: 0, message: 'No hay dispositivos online' };
 
   const ext = 'task-' + uuid();
+  const persistedParams = { ...resolvedParams, __execution_options: executionConfig };
   const ins = DB.run('INSERT INTO tasks(external_id,workflow_id,params,status,started_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?)',
-    [ext, workflow.id, JSON.stringify(labControl.sanitize(resolvedParams)), 'running', now(), now(), now()]);
+    [ext, workflow.id, JSON.stringify(labControl.sanitize(persistedParams)), 'running', now(), now(), now()]);
   const taskId = ins.lastInsertRowid;
 
   for (const d of devices) {
@@ -337,39 +362,100 @@ async function dispatchWorkflow(workflow, { groupId = null, deviceIds = null, pa
   }
 
   // ejecución en paralelo entre dispositivos (pasos secuenciales dentro de cada uno)
-  runTask(taskId, workflow, steps, devices).catch(e => console.error('[task]', e.message));
+  runTask(taskId, workflow, steps, devices, executionConfig).catch(e => console.error('[task]', e.message));
 
   return { task: DB.get('SELECT * FROM tasks WHERE id=?', [taskId]), devices_assigned: devices.length, message: `Rutina lanzada en ${devices.length} dispositivos` };
 }
 
+function writeExecutionLog(taskId, serial, command, result) {
+  DB.run('INSERT INTO execution_logs(task_id,device_serial,command_type,success,message,result_data,timestamp,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
+    [taskId, serial, command, result.success ? 1 : 0, result.message,
+      JSON.stringify(labControl.sanitize(result.data ?? {})), now(), now(), now()]);
+}
+
 // Ejecuta la secuencia de pasos en UN dispositivo. Los pasos son secuenciales
 // (dependen del estado de la pantalla), pero varios dispositivos corren a la vez.
-async function runDeviceSteps(taskId, steps, d) {
+async function runDeviceSteps(taskId, steps, d, executionOptions = {}) {
   DB.run('UPDATE task_assignments SET status=?, started_at=? WHERE task_id=? AND device_id=?', ['running', now(), taskId, d.id]);
   let failed = false, cancelled = false, lastMsg = null;
-  let settings = null; try { settings = require('./settings'); } catch (_) {}
+  let previousOrientation = null;
   const runtime = { taskId, originalPackage: null };
-  for (let i = 0; i < steps.length; i++) {
-    const task = DB.get('SELECT status FROM tasks WHERE id=?', [taskId]);
-    const control = labControl.state();
-    if (!task || ['cancel_requested', 'cancelled'].includes(task.status) || control.halted) {
-      cancelled = true;
-      lastMsg = control.halted ? (control.halt_reason || 'Emergency stop') : 'Cancellation requested';
-      break;
+  const pacing = automationRuntime.normalizeExecutionOptions(executionOptions || {});
+
+  try {
+    if (pacing.lock_portrait) {
+      try {
+        previousOrientation = await automationRuntime.beginPortraitGuard(routerDispatch, d.serial_number);
+        writeExecutionLog(taskId, d.serial_number, 'ORIENTATION_GUARD_BEGIN', {
+          success: true,
+          message: 'Portrait enforced for automation',
+          data: { source: previousOrientation.source },
+        });
+      } catch (error) {
+        failed = true;
+        lastMsg = error.message;
+        writeExecutionLog(taskId, d.serial_number, 'ORIENTATION_GUARD_BEGIN', {
+          success: false, message: error.message, data: {},
+        });
+      }
     }
-    const step = steps[i];
-    let r;
-    try { r = await executeStep(d, step, runtime); }
-    catch (e) { r = { success: false, message: e.message, data: {} }; }
-    DB.run('INSERT INTO execution_logs(task_id,device_serial,command_type,success,message,result_data,timestamp,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
-      [taskId, d.serial_number, step.type, r.success ? 1 : 0, r.message, JSON.stringify(labControl.sanitize(r.data ?? {})), now(), now(), now()]);
-    if (!r.success) {
-      if (r.cancelled) cancelled = true; else failed = true;
-      lastMsg = r.message;
-      break;
+
+    for (let i = 0; !failed && i < steps.length; i++) {
+      const task = DB.get('SELECT status FROM tasks WHERE id=?', [taskId]);
+      const control = labControl.state();
+      if (!task || ['cancel_requested', 'cancelled'].includes(task.status) || control.halted) {
+        cancelled = true;
+        lastMsg = control.halted ? (control.halt_reason || 'Emergency stop') : 'Cancellation requested';
+        break;
+      }
+      const step = steps[i];
+      let r;
+      try { r = await executeStep(d, step, runtime); }
+      catch (e) { r = { success: false, message: e.message, data: {} }; }
+      writeExecutionLog(taskId, d.serial_number, step.type, r);
+      if (!r.success) {
+        if (r.cancelled) cancelled = true; else failed = true;
+        lastMsg = r.message;
+        break;
+      }
+
+      if (i < steps.length - 1) {
+        const delays = [];
+        if (automationRuntime.stepNeedsSettle(step.type)) delays.push(pacing.action_settle_ms);
+        delays.push(pacing.step_delay_ms);
+        for (const delayMs of delays) {
+          const waited = await cancellableDelay(taskId, delayMs);
+          if (!waited.success) {
+            cancelled = true;
+            lastMsg = waited.message;
+            break;
+          }
+        }
+        if (cancelled) break;
+      }
     }
-    if (settings && i < steps.length - 1) { const d2 = settings.interStepDelayMs(); if (d2 > 0) await sleep(d2); }
+  } catch (error) {
+    failed = true;
+    lastMsg = error.message;
+  } finally {
+    if (previousOrientation) {
+      try {
+        await automationRuntime.restoreOrientation(routerDispatch, d.serial_number, previousOrientation);
+        writeExecutionLog(taskId, d.serial_number, 'ORIENTATION_GUARD_END', {
+          success: true,
+          message: 'Previous orientation restored',
+          data: { source: previousOrientation.source },
+        });
+      } catch (error) {
+        failed = true;
+        lastMsg = lastMsg ? `${lastMsg}; ${error.message}` : error.message;
+        writeExecutionLog(taskId, d.serial_number, 'ORIENTATION_GUARD_END', {
+          success: false, message: error.message, data: {},
+        });
+      }
+    }
   }
+
   const finalStatus = cancelled ? 'cancelled' : (failed ? 'failed' : 'completed');
   DB.run('UPDATE task_assignments SET status=?, error_message=?, completed_at=? WHERE task_id=? AND device_id=?', [finalStatus, lastMsg, now(), taskId, d.id]);
   DB.run('UPDATE devices SET status=?, current_task_id=NULL WHERE id=? AND current_task_id=?', ['online', d.id, taskId]);
@@ -378,8 +464,8 @@ async function runDeviceSteps(taskId, steps, d) {
 
 // Lanza la rutina en TODOS los dispositivos en paralelo (throughput ~×N en una
 // granja). El estado de la tarea agrega el resultado de cada dispositivo.
-async function runTask(taskId, workflow, steps, devices) {
-  const results = await Promise.all(devices.map(d => runDeviceSteps(taskId, steps, d)));
+async function runTask(taskId, workflow, steps, devices, executionOptions = {}) {
+  const results = await Promise.all(devices.map(d => runDeviceSteps(taskId, steps, d, executionOptions)));
   const cancellations = results.filter(r => r.cancelled);
   if (cancellations.length) {
     DB.run('UPDATE tasks SET status=?,error_message=?,completed_at=?,updated_at=? WHERE id=?',
@@ -424,7 +510,7 @@ function scheduleTick() {
         fire = inWin && !running && gapOk;
       }
       if (fire) {
-        dispatchWorkflow(wf, { groupId: s.group_id, params: { schedule_id: s.id, schedule_name: s.name } });
+        dispatchWorkflow(wf, { groupId: s.group_id, params: { schedule_id: s.id, schedule_name: s.name }, executionOptions: safeJson(wf.execution_options, {}) });
         DB.run('UPDATE schedules SET last_run_at=? WHERE id=?', [now(), s.id]);
       }
     } catch (e) { console.error('[schedule]', e.message); }
@@ -433,4 +519,17 @@ function scheduleTick() {
 
 function safeJson(v, def) { if (v == null) return def; if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch { return def; } }
 
-module.exports = { init, executeStep, dispatchWorkflow, scheduleTick, routerDispatch, safeJson, runDeviceSteps, resolveRoutineVars, validateRoutineParams, validateWorkflowSteps: labControl.validateWorkflowSteps };
+module.exports = {
+  init,
+  executeStep,
+  dispatchWorkflow,
+  scheduleTick,
+  routerDispatch,
+  safeJson,
+  runDeviceSteps,
+  resolveRoutineVars,
+  validateRoutineParams,
+  validateWorkflowSteps: labControl.validateWorkflowSteps,
+  normalizeExecutionOptions: automationRuntime.normalizeExecutionOptions,
+  pacingCatalog: automationRuntime.pacingCatalog,
+};

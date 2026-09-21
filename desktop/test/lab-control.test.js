@@ -36,6 +36,7 @@ test('lab mode is safe by default and validates bounded canary workflows', async
 
   const safe = labControl.validateWorkflowSteps([
     { type: 'OPEN_APP', package_name: 'com.example.test' },
+    { type: 'LIST_PACKAGES', discover_launchable: true },
     { type: 'WAIT', duration: 250 },
     { type: 'REPORT_RESULT' },
   ]);

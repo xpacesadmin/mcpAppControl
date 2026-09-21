@@ -1,4 +1,4 @@
-# MCP Agent Android - v2.0
+# XSAlpha Agent Android - v2.0
 
 Aplicación Android para automatización de dispositivos en la red MCP AppControl.
 
@@ -20,7 +20,7 @@ Aplicación Android para automatización de dispositivos en la red MCP AppContro
 
 ## Configuración del Servidor
 
-1. Abre la aplicación MCP Agent
+1. Abre la aplicación XSAlpha Agent
 2. Ve a "Configurar Servidor"
 3. Ingresa la URL WebSocket (ej: `ws://10.0.2.2:6001`)
 4. Configura el número de serie único para cada dispositivo
@@ -38,7 +38,7 @@ Aplicación Android para automatización de dispositivos en la red MCP AppContro
 
 ```
 ┌─────────────────┐     WebSocket      ┌──────────────────┐
-│  MCP Agent App  │ ◄──────────────► │  MCP Server      │
+│  XSAlpha Agent App  │ ◄──────────────► │  MCP Server      │
 │                 │                    │  (Laravel/Node)  │
 │ • MainActivity  │                    │                  │
 │ • Foreground    │                    │ • Orquestador    │

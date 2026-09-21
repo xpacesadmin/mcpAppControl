@@ -155,14 +155,31 @@ async function stabilizeDevice(serial, params, shell) {
     timezone: !options.timezone || state.timezone === options.timezone,
     clock: !options.syncTime || (clockDriftSeconds !== null && clockDriftSeconds <= options.maxClockDriftSeconds),
   };
-  const failedOperations = operationsResult.filter(result => !result.success);
+  // Some Samsung/Android builds apply `cmd alarm set-time` (and occasionally
+  // `set-timezone`) but still return adb exit 255. The read-back below is
+  // authoritative for those two commands: preserve the raw adb failure for
+  // diagnostics while allowing a verified postcondition to count as success.
+  const operationChecks = {
+    host_clock: 'clock',
+    timezone: 'timezone',
+  };
+  const reconciledOperations = operationsResult.map(result => {
+    const checkKey = operationChecks[result.key];
+    const verifiedByReadback = !result.success && checkKey && checks[checkKey] === true;
+    return verifiedByReadback
+      ? { ...result, effective_success: true, verified_by_readback: true }
+      : { ...result, effective_success: result.success };
+  });
+  const failedOperations = reconciledOperations.filter(result => !result.effective_success);
+  const recoveredOperations = reconciledOperations.filter(result => result.verified_by_readback);
   const failedChecks = Object.entries(checks).filter(([, valid]) => !valid).map(([key]) => key);
   const success = failedOperations.length === 0 && failedChecks.length === 0;
 
   return {
     success,
     message: success
-      ? 'Dispositivo estabilizado y reloj verificado (' + options.clockSource + ', deriva ' + clockDriftSeconds + 's)'
+      ? 'Dispositivo estabilizado y reloj verificado (' + options.clockSource + ', deriva ' + clockDriftSeconds + 's'
+        + (recoveredOperations.length ? '; ' + recoveredOperations.length + ' respuesta(s) ADB validada(s) por lectura' : '') + ')'
       : 'Estabilización incompleta: ' + failedOperations.length + ' comandos fallaron; verificaciones: ' + (failedChecks.join(', ') || 'sin fallos'),
     data: {
       requested: options,
@@ -170,7 +187,7 @@ async function stabilizeDevice(serial, params, shell) {
       state,
       clock_drift_seconds: clockDriftSeconds,
       checks,
-      operations: operationsResult,
+      operations: reconciledOperations,
     },
   };
 }

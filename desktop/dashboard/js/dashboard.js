@@ -678,6 +678,32 @@ async function sendVirtualText() {
 // ACCIONES RÁPIDAS (ACCIONES EN LOTE MCP CONTROL BSOLUTIONS)
 // ============================================================
 
+function showStabilizationSummary(batch = {}) {
+    const rows = Array.isArray(batch.results) ? batch.results : [];
+    const successful = rows.filter(row => row.success);
+    const failed = rows.filter(row => !row.success);
+    const drifts = successful
+        .map(row => Number(row.data?.clock_drift_seconds))
+        .filter(value => Number.isFinite(value));
+    const timezones = [...new Set(successful.map(row => row.data?.state?.timezone).filter(Boolean))];
+    const sampleDate = successful.find(row => row.data?.state?.date)?.data?.state?.date;
+    const lines = [
+        '🕐 Sincronización de hora terminada',
+        `${successful.length}/${rows.length || Number(batch.total) || 0} dispositivo(s) verificado(s).`,
+    ];
+    if (sampleDate) lines.push(`Hora leída: ${sampleDate}`);
+    if (timezones.length) lines.push(`Zona horaria: ${timezones.join(', ')}`);
+    if (drifts.length) lines.push(`Deriva máxima: ${Math.max(...drifts)} segundo(s).`);
+    lines.push('', 'La orden se aplica en segundo plano y no cambia la pantalla.');
+    lines.push('Las fechas antiguas dentro de notificaciones ya publicadas no se reescriben; desaparecen cuando la app vuelve a publicar la notificación.');
+    if (failed.length) {
+        lines.push('', 'Fallos:');
+        failed.slice(0, 8).forEach(row => lines.push(`• ${row.device || `Dispositivo ${row.device_id}`}: ${row.message || 'sin detalle'}`));
+        if (failed.length > 8) lines.push(`• …y ${failed.length - 8} más (consulta el registro).`);
+    }
+    alert(lines.join('\n'));
+}
+
 async function quickAction(command, params = {}) {
     let ids = [...selectedDeviceIds];
     if (!ids.length) {
@@ -695,6 +721,14 @@ async function quickAction(command, params = {}) {
         params = { ...params, confirm: true };
     }
 
+    const stabilizationButtons = command === 'DEVICE_STABILIZE'
+        ? [...document.querySelectorAll('[data-stabilize-action="true"]')]
+        : [];
+    const stabilizationLabels = stabilizationButtons.map(button => button.textContent);
+    stabilizationButtons.forEach(button => {
+        button.disabled = true;
+        button.textContent = `⏳ Sincronizando ${ids.length}…`;
+    });
     addLog(`Ejecutando "${command}" en ${ids.length} dispositivos…`, 'info');
     try {
         const r = await apiFetch('/devices/batch-command', {
@@ -703,8 +737,78 @@ async function quickAction(command, params = {}) {
         });
         const d = r.data || {};
         addLog(`✓ "${command}": ${d.ok}/${d.total} ok`, d.failed ? 'warning' : 'info');
+        if (d.failed && Array.isArray(d.results)) {
+            d.results.filter(row => !row.success).forEach(row => {
+                const device = devices.find(item => Number(item.id) === Number(row.device_id));
+                addLog(`✗ ${device?.name || row.device || `Dispositivo ${row.device_id}`}: ${row.message || 'falló sin detalle'}`, 'error');
+            });
+        }
+        if (command === 'DEVICE_STABILIZE') showStabilizationSummary(d);
     } catch (e) {
         addLog(`Error en acción "${command}": ${e.message}`, 'error');
+        if (command === 'DEVICE_STABILIZE') alert(`No se pudo sincronizar la hora: ${e.message}`);
+    } finally {
+        stabilizationButtons.forEach((button, index) => {
+            button.disabled = false;
+            button.textContent = stabilizationLabels[index];
+        });
+    }
+}
+
+// Consulta read-only del estado real de XSAlpha. No instala, abre ni modifica
+// nada en los teléfonos; muestra el resultado por dispositivo en un modal.
+async function checkAgentReadiness() {
+    let ids = [...selectedDeviceIds];
+    if (!ids.length) ids = devices.filter(d => ['online', 'busy'].includes(d.status)).map(d => d.id);
+    if (!ids.length) { alert('No hay dispositivos online seleccionados'); return; }
+
+    document.getElementById('agentStatusModal')?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'agentStatusModal';
+    overlay.className = 'custom-modal-overlay';
+    overlay.innerHTML = `<div class="custom-modal-box" style="max-width:760px">
+      <h3>🩺 Estado de XSAlpha Agent</h3>
+      <p class="muted-text">Consulta de solo lectura en ${ids.length} dispositivo(s).</p>
+      <div id="agentStatusResults" class="mail-preview">Comprobando…</div>
+      <div class="modal-actions"><button id="agentStatusClose" class="btn btn-secondary-sm">Cerrar</button></div>
+    </div>`;
+    document.body.appendChild(overlay);
+    overlay.querySelector('#agentStatusClose')?.addEventListener('click', () => overlay.remove());
+    overlay.addEventListener('click', event => { if (event.target === overlay) overlay.remove(); });
+
+    const button = document.getElementById('agentReadinessBtn');
+    if (button) button.disabled = true;
+    try {
+        const response = await apiFetch('/devices/batch-command', {
+            method: 'POST',
+            body: JSON.stringify({ device_ids: ids, command: 'AGENT_STATUS', params: {} }),
+        });
+        const rows = response.data?.results || [];
+        const html = rows.map(row => {
+            const state = row.data || {};
+            const device = devices.find(item => Number(item.id) === Number(row.device_id));
+            const yesNo = value => value ? '<span style="color:#22c55e">Sí</span>' : '<span style="color:#ef4444">No</span>';
+            const conflict = state.ui_automation_activa
+                ? '<span style="color:#f59e0b">Sí · TikMatrix ocupa UiAutomation</span>'
+                : '<span style="color:#22c55e">No</span>';
+            return `<section style="padding:10px 0;border-bottom:1px solid #334155">
+              <strong>${escapeHtml(device?.name || row.device || `Dispositivo ${row.device_id}`)}</strong>
+              <div class="mail-row"><span class="mail-dev">Instalado</span><code>${yesNo(!!state.instalado)}</code></div>
+              <div class="mail-row"><span class="mail-dev">Versión</span><code>${escapeHtml(state.version || '—')}</code></div>
+              <div class="mail-row"><span class="mail-dev">Accesibilidad habilitada</span><code>${yesNo(!!state.accesibilidad)}</code></div>
+              <div class="mail-row"><span class="mail-dev">Servicio vinculado</span><code>${yesNo(!!state.accesibilidad_vinculada)}</code></div>
+              <div class="mail-row"><span class="mail-dev">Conflicto UiAutomation</span><code>${conflict}</code></div>
+              <div class="mail-row"><span class="mail-dev">Listo para MCP</span><code>${yesNo(!!state.listo)}</code></div>
+              <div class="muted-text">${escapeHtml(row.message || '')}</div>
+            </section>`;
+        }).join('');
+        const results = overlay.querySelector('#agentStatusResults');
+        if (results) results.innerHTML = html || 'No se recibió estado de ningún dispositivo.';
+    } catch (error) {
+        const results = overlay.querySelector('#agentStatusResults');
+        if (results) results.textContent = `No se pudo consultar XSAlpha: ${error.message}`;
+    } finally {
+        if (button) button.disabled = false;
     }
 }
 
@@ -1096,8 +1200,9 @@ function openAccountVerifyModal() {
     overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
     overlay.innerHTML = `
       <div class="proxy-modal mail-modal">
-        <h3>🔍 Verificar cuentas en teléfonos</h3>
-        <p class="proxy-modal-sub">Lee las cuentas reales de cada teléfono con <code>dumpsys account</code> y las contrasta con las asignadas.</p>
+        <h3>🔍 Inventario de cuentas</h3>
+        <p class="proxy-modal-sub">Escanea las flotas asignadas y clasifica cada cuenta como presente, ausente, cambiada, pendiente de re-login o no alcanzable.</p>
+        <p class="proxy-note">Android confirma presencia local, pero no puede probar si Google acepta la sesión. Marca <b>Requiere re-login</b> solamente cuando el teléfono o una app muestre esa evidencia.</p>
 
         <label>Plataforma
           <input id="verifyPlatform" type="text" value="com.google" placeholder="com.google, com.tiktok, com.instagram…">
@@ -1105,22 +1210,34 @@ function openAccountVerifyModal() {
         <div class="mail-row">
           <label class="mail-dev"><input id="accountMonitorEnabled" type="checkbox"> Verificación automática</label>
           <label>Intervalo (min) <input id="accountMonitorMinutes" type="number" min="1" max="1440" value="5" style="width:80px"></label>
-          <button class="btn-secondary" onclick="saveAccountMonitor()">Guardar</button>
+          <button id="accountMonitorSaveBtn" type="button" class="btn-secondary">Guardar</button>
         </div>
         <div id="accountInventorySummary" class="mail-preview">Cargando inventario…</div>
 
         <div class="apps-dir-actions">
-          <button class="btn-secondary" onclick="verifySingleAccount()">Verificar un teléfono</button>
-          <button class="btn-primary" onclick="verifyAllAccounts()">Verificar todos</button>
+          <button id="accountVerifySingleBtn" type="button" class="btn-secondary">Verificar un teléfono</button>
+          <button id="accountScanFleetsBtn" type="button" class="btn-primary">Escanear flotas</button>
         </div>
+        <div id="accountVerifyStatus" class="proxy-status">Listo para escanear.</div>
         <div id="verifyResult" class="mail-preview"></div>
 
         <div class="proxy-modal-actions">
-          <button class="btn-secondary" onclick="document.getElementById('accountVerifyModal').remove()">Cerrar</button>
+          <button id="accountVerifyCloseBtn" type="button" class="btn-secondary">Cerrar</button>
         </div>
       </div>`;
     document.body.appendChild(overlay);
+    overlay.querySelector('#accountMonitorSaveBtn')?.addEventListener('click', saveAccountMonitor);
+    overlay.querySelector('#accountVerifySingleBtn')?.addEventListener('click', verifySingleAccount);
+    overlay.querySelector('#accountScanFleetsBtn')?.addEventListener('click', scanFleetAccounts);
+    overlay.querySelector('#accountVerifyCloseBtn')?.addEventListener('click', () => overlay.remove());
     refreshAccountInventoryPanel();
+}
+
+function setAccountVerifyStatus(message, isError = false) {
+    const el = document.getElementById('accountVerifyStatus');
+    if (!el) return;
+    el.textContent = String(message || '');
+    el.style.color = isError ? '#dc2626' : '';
 }
 
 async function refreshAccountInventoryPanel() {
@@ -1131,7 +1248,7 @@ async function refreshAccountInventoryPanel() {
             apiFetch('/accounts/inventory?platform=' + encodeURIComponent(platform)),
         ]);
         const cfg = responses[0].data || {};
-        const inventory = responses[1].data || [];
+        const inventory = (responses[1].data || []).filter(row => row.active === true || Number(row.active) === 1);
         const enabled = document.getElementById('accountMonitorEnabled');
         const minutes = document.getElementById('accountMonitorMinutes');
         if (enabled) enabled.checked = cfg.enabled !== false;
@@ -1143,12 +1260,14 @@ async function refreshAccountInventoryPanel() {
         }, {});
         const box = document.getElementById('accountInventorySummary');
         if (box) box.innerHTML =
-            '<div class="mail-row"><span class="mail-dev">Asignadas</span><code>' + inventory.length + '</code></div>' +
+            '<div class="mail-row"><span class="mail-dev">Asignaciones activas</span><code>' + inventory.length + '</code></div>' +
             '<div class="mail-row"><span class="mail-dev">Presentes</span><code style="color:#22c55e">' + (counts.present || 0) + '</code></div>' +
             '<div class="mail-row"><span class="mail-dev">Ausentes</span><code style="color:#ef4444">' + (counts.missing || 0) + '</code></div>' +
+            '<div class="mail-row"><span class="mail-dev">Cambiadas</span><code style="color:#f97316">' + (counts.swapped || 0) + '</code></div>' +
+            '<div class="mail-row"><span class="mail-dev">Requieren re-login</span><code style="color:#eab308">' + (counts.needs_reauth || 0) + '</code></div>' +
             '<div class="mail-row"><span class="mail-dev">No alcanzables</span><code style="color:#f59e0b">' + (counts.unreachable || 0) + '</code></div>' +
             '<div class="mail-row"><span class="mail-dev">Sin verificar</span><code>' + (counts.unknown || 0) + '</code></div>';
-    } catch (error) { setMailStatus('Error cargando inventario: ' + error.message, true); }
+    } catch (error) { setAccountVerifyStatus('Error cargando inventario: ' + error.message, true); }
 }
 
 async function saveAccountMonitor() {
@@ -1157,9 +1276,9 @@ async function saveAccountMonitor() {
     const platform = document.getElementById('verifyPlatform')?.value.trim() || 'com.google';
     try {
         await apiFetch('/accounts/inventory/monitor', { method: 'PUT', body: JSON.stringify({ enabled, interval_sec: minutes * 60, platform }) });
-        setMailStatus('Monitor de cuentas ' + (enabled ? 'activo' : 'desactivado') + ' · cada ' + minutes + ' min');
+        setAccountVerifyStatus('Monitor de cuentas ' + (enabled ? 'activo' : 'desactivado') + ' · cada ' + minutes + ' min');
         await refreshAccountInventoryPanel();
-    } catch (error) { setMailStatus('Error: ' + error.message, true); }
+    } catch (error) { setAccountVerifyStatus('Error: ' + error.message, true); }
 }
 
 async function verifySingleAccount() {
@@ -1167,9 +1286,9 @@ async function verifySingleAccount() {
     const serial = await customPrompt('Verificar cuenta', 'Serial del dispositivo (o ID):');
     if (!serial) return;
 
-    setMailStatus('Verificando…', false);
+    setAccountVerifyStatus('Verificando…', false);
     const targets = devices.filter(d => d.serial_number === serial || String(d.id) === serial);
-    if (!targets.length) { setMailStatus('Dispositivo no encontrado.', true); return; }
+    if (!targets.length) { setAccountVerifyStatus('Dispositivo no encontrado.', true); return; }
     const dev = targets[0];
 
     try {
@@ -1180,76 +1299,144 @@ async function verifySingleAccount() {
         showAccountVerifyResult(r.data);
         await refreshAccountInventoryPanel();
     } catch (e) {
-        setMailStatus(`Error: ${e.message}`, true);
+        setAccountVerifyStatus(`Error: ${e.message}`, true);
     }
 }
 
-async function verifyAllAccounts() {
+async function scanFleetAccounts() {
     const platform = document.getElementById('verifyPlatform')?.value.trim() || 'com.google';
-    setMailStatus('Verificando todos los dispositivos…', false);
+    const button = document.getElementById('accountScanFleetsBtn');
+    if (button) { button.disabled = true; button.textContent = 'Escaneando…'; }
+    setAccountVerifyStatus('Escaneando cuentas de las flotas…', false);
 
     try {
-        const r = await apiFetch('/accounts/verify-all', {
+        const r = await apiFetch('/accounts/inventory/scan', {
             method: 'POST',
             body: JSON.stringify({ platform }),
         });
         showAccountVerifyResult(r.data);
         await refreshAccountInventoryPanel();
+        setAccountVerifyStatus(r.message || 'Escaneo completado');
     } catch (e) {
-        setMailStatus(`Error: ${e.message}`, true);
+        setAccountVerifyStatus(`Error: ${e.message}`, true);
+    } finally {
+        if (button) { button.disabled = false; button.textContent = 'Escanear flotas'; }
     }
+}
+
+// Conserva compatibilidad con llamadas antiguas del panel.
+async function verifyAllAccounts() { return scanFleetAccounts(); }
+
+const ACCOUNT_HEALTH_META = {
+    present: { label: 'Presente localmente', color: '#22c55e' },
+    missing: { label: 'Ausente', color: '#ef4444' },
+    swapped: { label: 'Cuenta cambiada', color: '#f97316' },
+    needs_reauth: { label: 'Requiere re-login', color: '#eab308' },
+    unreachable: { label: 'No alcanzable', color: '#f59e0b' },
+    unknown: { label: 'Sin verificar', color: '#94a3b8' },
+    unassigned: { label: 'Sin asignar', color: '#94a3b8' },
+};
+
+function accountHealthMeta(state) {
+    return ACCOUNT_HEALTH_META[state] || ACCOUNT_HEALTH_META.unknown;
+}
+
+function renderAccountDeviceResult(row) {
+    const meta = accountHealthMeta(row.state);
+    let html = `<h4 style="margin-top:16px">${escapeHtml(row.device_name || row.serial || 'Dispositivo')}</h4>
+      <div class="mail-row"><span class="mail-dev">Estado</span><code style="color:${meta.color}">${meta.label}</code></div>
+      <div class="mail-row"><span class="mail-dev">Encontradas / asignadas</span><code>${Number(row.real_count || 0)} / ${Number(row.assigned_count || 0)}</code></div>`;
+
+    if (row.message && ['unreachable', 'unknown'].includes(row.state)) {
+        html += `<div class="mail-row"><span class="mail-dev">Detalle</span><code>${escapeHtml(row.message)}</code></div>`;
+    }
+    for (const account of (row.assigned_accounts || [])) {
+        const accountMeta = accountHealthMeta(account.verification_state || row.state);
+        let action = '';
+        if (account.verification_state === 'needs_reauth') {
+            action = ` <button type="button" class="btn-secondary account-review-action" data-account-id="${Number(account.id)}" data-review-state="present">Marcar resuelto</button>`;
+        } else if (account.verification_state === 'present') {
+            action = ` <button type="button" class="btn-secondary account-review-action" data-account-id="${Number(account.id)}" data-review-state="needs_reauth">Requiere re-login</button>`;
+        }
+        html += `<div class="mail-row"><span class="mail-dev">${escapeHtml(account.email)}</span><span><code style="color:${accountMeta.color}">${accountMeta.label}</code>${action}</span></div>`;
+    }
+
+    if (row.state === 'swapped' && row.assigned_accounts?.length && row.unexpected_on_device?.length) {
+        html += '<div class="proxy-note">El cambio fue detectado, pero el inventario no se reasigna automáticamente.</div>';
+        for (const observedEmail of row.unexpected_on_device) {
+            const expectedId = Number(row.assigned_accounts[0].id);
+            html += `<div class="mail-row"><span class="mail-dev">Observada: ${escapeHtml(observedEmail)}</span><button type="button" class="btn-secondary account-swap-confirm" data-expected-account-id="${expectedId}" data-observed-email="${escapeAttr(observedEmail)}">Confirmar reemplazo</button></div>`;
+        }
+    } else if (row.unexpected_on_device?.length) {
+        html += `<div class="mail-row"><span class="mail-dev">Adicionales observadas</span><code>${row.unexpected_on_device.map(escapeHtml).join(', ')}</code></div>`;
+    }
+    return html;
+}
+
+function bindAccountVerifyActions(root) {
+    root.querySelectorAll('.account-swap-confirm').forEach(button => {
+        button.addEventListener('click', () => confirmObservedSwap(
+            Number(button.dataset.expectedAccountId),
+            String(button.dataset.observedEmail || '')
+        ));
+    });
+    root.querySelectorAll('.account-review-action').forEach(button => {
+        button.addEventListener('click', () => setAccountReviewState(
+            Number(button.dataset.accountId),
+            String(button.dataset.reviewState || '')
+        ));
+    });
+}
+
+async function setAccountReviewState(accountId, state) {
+    try {
+        const r = await apiFetch(`/accounts/${Number(accountId)}/verification-state`, {
+            method: 'PUT',
+            body: JSON.stringify({ state }),
+        });
+        setAccountVerifyStatus(r.message || 'Estado actualizado');
+        await scanFleetAccounts();
+    } catch (error) { setAccountVerifyStatus('Error: ' + error.message, true); }
+}
+
+async function confirmObservedSwap(expectedAccountId, observedEmail) {
+    const answer = await customPrompt(
+        'Confirmar reemplazo de cuenta',
+        `La cuenta observada ${observedEmail} pasará a ser la asignación activa. Escribe CONFIRMAR para continuar.`,
+        '',
+        'CONFIRMAR'
+    );
+    if (String(answer || '').trim().toUpperCase() !== 'CONFIRMAR') return;
+    try {
+        const r = await apiFetch('/accounts/inventory/confirm-swap', {
+            method: 'POST',
+            body: JSON.stringify({ expected_account_id: Number(expectedAccountId), observed_email: observedEmail, confirm: true }),
+        });
+        setAccountVerifyStatus(r.message || 'Reemplazo confirmado');
+        await scanFleetAccounts();
+    } catch (error) { setAccountVerifyStatus('Error: ' + error.message, true); }
 }
 
 function showAccountVerifyResult(data) {
     const box = document.getElementById('verifyResult');
     if (!box) return;
-
-    let html = '';
-
     if (data.summary) {
-        // Resultado de verificación masiva
-        html = `<h4>Resumen</h4>
-          <div class="mail-row"><span class="mail-dev">Dispositivos verificados</span><code>${data.summary.devices_checked}</code></div>
-          <div class="mail-row"><span class="mail-dev">Cuentas reales encontradas</span><code>${data.summary.total_real}</code></div>
-          <div class="mail-row"><span class="mail-dev">Cuentas asignadas</span><code>${data.summary.total_assigned}</code></div>
-          <div class="mail-row"><span class="mail-dev">Sin encontrar en teléfono</span><code style="color:${data.summary.total_missing > 0 ? '#dc2626' : '#22c55e'}">${data.summary.total_missing}</code></div>`;
-
-        for (const r of data.results) {
-            const statusColor = r.success ? '#22c55e' : '#dc2626';
-            html += `<h4 style="margin-top:16px">${escapeHtml(r.device_name || r.serial)} ${r.success ? '✓' : '✗'}</h4>`;
-            html += `<div class="mail-row"><span class="mail-dev">Reales</span><code>${r.real_count}</code></div>`;
-            html += `<div class="mail-row"><span class="mail-dev">Asignadas</span><code>${r.assigned_count}</code></div>`;
-            if (r.missing_from_device.length) {
-                html += `<div class="mail-row"><span class="mail-dev">Sin encontrar</span><code style="color:#dc2626">${r.missing_from_device.join(', ')}</code></div>`;
-            }
-            if (r.mismatched?.length) {
-                html += `<div class="mail-row"><span class="mail-dev">Asignadas pero no en teléfono</span><code style="color:#f59e0b">${r.mismatched.map(m => m.email).join(', ')}</code></div>`;
-            }
-        }
-    } else {
-        // Resultado de verificación individual
-        const status = data.total_real === data.total_assigned ? '#22c55e' : '#f59e0b';
-        html = `<h4>${escapeHtml(data.device_serial)}</h4>
-          <div class="mail-row"><span class="mail-dev">Cuentas reales</span><code>${data.total_real}</code></div>
-          <div class="mail-row"><span class="mail-dev">Cuentas asignadas</span><code>${data.total_assigned}</code></div>
-          <div class="mail-row"><span class="mail-dev">Estado</span><code style="color:${status}">${data.total_real} vs ${data.total_assigned}</code></div>`;
-
-        if (data.missing_from_device.length) {
-            html += `<h4 style="margin-top:16px;color:#dc2626">⚠️ Cuentas asignadas pero no encontradas</h4>`;
-            for (const e of data.missing_from_device) {
-                html += `<div class="mail-row"><span class="mail-dev">${escapeHtml(e)}</span><code style="color:#dc2626">NO en teléfono</code></div>`;
-            }
-        }
-
-        if (data.real_accounts.length) {
-            html += `<h4 style="margin-top:16px">Cuentas reales encontradas</h4>`;
-            for (const a of data.real_accounts) {
-                html += `<div class="mail-row"><span class="mail-dev">${escapeHtml(a.email)}</span><code>${a.assigned ? '✅ asignada' : 'sin asignar'}</code></div>`;
-            }
-        }
+        const summary = data.summary;
+        let html = `<h4>Resumen</h4>
+          <div class="mail-row"><span class="mail-dev">Flotas escaneadas</span><code>${Number(summary.devices_checked || 0)}</code></div>
+          <div class="mail-row"><span class="mail-dev">Presentes</span><code style="color:#22c55e">${Number(summary.devices_present || 0)}</code></div>
+          <div class="mail-row"><span class="mail-dev">Cambiadas</span><code style="color:#f97316">${Number(summary.devices_swapped || 0)}</code></div>
+          <div class="mail-row"><span class="mail-dev">Requieren re-login</span><code style="color:#eab308">${Number(summary.devices_needs_reauth || 0)}</code></div>
+          <div class="mail-row"><span class="mail-dev">Ausentes</span><code style="color:#ef4444">${Number(summary.devices_missing || 0)}</code></div>
+          <div class="mail-row"><span class="mail-dev">No alcanzables</span><code style="color:#f59e0b">${Number(summary.devices_unreachable || 0)}</code></div>
+          <div class="mail-row"><span class="mail-dev">Sin verificar</span><code>${Number(summary.devices_unknown || 0)}</code></div>`;
+        for (const row of (data.results || [])) html += renderAccountDeviceResult(row);
+        box.innerHTML = html;
+        bindAccountVerifyActions(box);
+        return;
     }
-
-    box.innerHTML = html;
+    box.innerHTML = renderAccountDeviceResult(data || {});
+    bindAccountVerifyActions(box);
 }
 
 // ============================================================

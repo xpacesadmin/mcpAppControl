@@ -6,7 +6,7 @@ export const ANTI_IDLE_TOOLS = [
     },
     {
         name: "configure_anti_idle",
-        description: "Configures neutral app switching and scrolling for explicitly named, allowlisted devices with verified proxy routes",
+        description: "Configures one-app-per-cycle neutral activity for explicitly named, allowlisted devices with verified proxy routes",
         inputSchema: {
             type: "object",
             properties: {
@@ -15,7 +15,11 @@ export const ANTI_IDLE_TOOLS = [
                 interval_seconds: { type: "number", minimum: 60, maximum: 3600, default: 480 },
                 action_duration_seconds: { type: "number", minimum: 10, maximum: 300, default: 45 },
                 gesture_interval_seconds: { type: "number", minimum: 2, maximum: 15, default: 4 },
+                scrolls_before_dwell: { type: "number", minimum: 1, maximum: 20, default: 3 },
+                video_dwell_seconds: { type: "number", minimum: 0, maximum: 600, default: 180 },
                 natural_scrolls_enabled: { type: "boolean", default: true },
+                pace: { type: "string", enum: ["careful", "standard"], default: "careful" },
+                lock_portrait: { type: "boolean", default: true },
                 confirm: { type: "boolean" },
                 idempotency_key: { type: "string" },
             },

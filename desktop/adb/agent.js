@@ -5,26 +5,23 @@
 // escribe el XML. El sistema mata el proceso por presión de memoria, y en el feed
 // además nunca se alcanza el estado "idle" que ese volcado espera.
 //
-// La solución es leer desde DENTRO del teléfono. El Agente Bsolutions expone la
-// jerarquía por HTTP desde su servicio de accesibilidad; los lectores de terceros
-// basados en uiautomator2 hacen lo mismo con su propia instrumentación. Este
-// módulo habla con cualquiera de los dos —mismo protocolo mínimo: /ping y
-// /jsonrpc/0— y deja `uiautomator dump` como último recurso.
+// La solución es leer desde DENTRO del teléfono. El XSAlpha Agent expone la
+// jerarquía por HTTP desde su servicio de accesibilidad. El MCP usa únicamente
+// XSAlpha por defecto: no inicia ni reutiliza lectores UiAutomation de terceros.
+// El protocolo mínimo es /ping y /jsonrpc/0.
 
 const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-// Agentes que sabemos consultar, en orden de preferencia. Cada uno escucha en su
-// propio puerto DENTRO del teléfono; el Agente Bsolutions usa el 9009 para no
-// pelearse con el lector de terceros si ambos están instalados.
+// Paquetes oficiales de XSAlpha que sabemos consultar. Ambos escuchan en el
+// puerto 9009 DENTRO del teléfono.
 //
 // El sufijo .debug existe porque la compilación de depuración del agente lo añade
 // a su applicationId: sin listarlo, el agente instalado no se reconocería.
 const AGENTES_POR_DEFECTO = [
   { paquete: 'dev.mcp.agent',        puertoRemoto: 9009, propio: true },
   { paquete: 'dev.mcp.agent.debug',  puertoRemoto: 9009, propio: true },
-  { paquete: 'com.github.tikmatrix', puertoRemoto: 9008, propio: false },
 ];
 
 // serial -> { puerto, paquete, puertoRemoto }
@@ -32,14 +29,21 @@ const sesiones = new Map();
 let siguientePuerto = 9700;
 let resolveAdb = () => 'adb';
 let agentes = [...AGENTES_POR_DEFECTO];
+let permitirAgentesExternos = false;
 
-function init({ adbResolver, agentPackages } = {}) {
+function init({ adbResolver, agentPackages, allowExternalAgents = false } = {}) {
   if (adbResolver) resolveAdb = adbResolver;
-  if (Array.isArray(agentPackages) && agentPackages.length) {
-    agentes = agentPackages.map(a => (typeof a === 'string'
+  permitirAgentesExternos = allowExternalAgents === true;
+  const solicitados = Array.isArray(agentPackages) && agentPackages.length
+    ? agentPackages.map(a => (typeof a === 'string'
       ? { paquete: a, puertoRemoto: 9009, propio: true }
-      : a));
-  }
+      : a))
+    : AGENTES_POR_DEFECTO;
+  agentes = solicitados.filter(a => a && (a.propio !== false || permitirAgentesExternos));
+
+  // Nunca reutilizar una sesión creada bajo una política anterior. En especial,
+  // volver al inicio normal debe retirar cualquier lector externo cacheado.
+  sesiones.clear();
 }
 
 function adbCmd(args, timeout = 15000) {
@@ -83,19 +87,82 @@ async function enlazar(serial, puertoLocal, puertoRemoto) {
   await adbCmd(['-s', serial, 'forward', `tcp:${puertoLocal}`, `tcp:${puertoRemoto}`]);
 }
 
+// Cuando XSAlpha está habilitado, Android debe reservarle la sesión de
+// accesibilidad. Un lector UiAutomation de terceros puede suprimir XSAlpha; esa
+// condición se informa, pero el MCP no reutiliza ese lector por defecto.
+async function paquetePropioHabilitado(serial, presentes) {
+  const propios = presentes.filter(a => a.propio).map(a => a.paquete);
+  if (!propios.length) return null;
+  const salida = await adbCmd(['-s', serial, 'shell', 'settings', 'get', 'secure',
+    'enabled_accessibility_services']).catch(() => '');
+  return propios.find(p => salida.includes(`${p}/`)) || null;
+}
+
+async function uiAutomationActiva(serial) {
+  const salida = await adbCmd(['-s', serial, 'shell', 'dumpsys', 'accessibility'], 20000).catch(() => '');
+  return /\bUi Automation\s*\[/i.test(salida);
+}
+
+// Extrae solamente la sección "Bound services" de dumpsys accessibility.
+// Android usa tanto una forma de una línea como un bloque de varias líneas.
+function boundServicesSection(accessibilityDump) {
+  const source = String(accessibilityDump || '');
+  const marker = /\bbound services\s*:\s*/i.exec(source);
+  if (!marker) return '';
+  const start = marker.index + marker[0].length;
+  if (source[start] === '{') {
+    let depth = 0;
+    for (let index = start; index < source.length; index += 1) {
+      if (source[index] === '{') depth += 1;
+      else if (source[index] === '}') {
+        depth -= 1;
+        if (depth === 0) return source.slice(start + 1, index);
+      }
+    }
+    return source.slice(start + 1);
+  }
+  const remainder = source.slice(start);
+  const sibling = /^\s*(?:binding|crashed|enabled|installed)\s+services\s*:/im.exec(remainder);
+  return sibling ? remainder.slice(0, sibling.index) : remainder;
+}
+
+function accessibilityRuntimeState(accessibilityDump, installedPackage) {
+  const packageName = String(installedPackage || '').toLowerCase();
+  const bound = boundServicesSection(accessibilityDump).toLowerCase();
+  return {
+    bound: !!packageName && bound.includes(`${packageName}/`),
+    uiAutomation: /\bUi Automation\s*\[/i.test(String(accessibilityDump || '')),
+  };
+}
+
 // Devuelve el puerto local ya enlazado con un agente que responde.
 async function asegurar(serial) {
-  const previa = sesiones.get(serial);
-  if (previa && await ping(previa.puerto)) return previa.puerto;
-
-  const puerto = previa?.puerto || siguientePuerto++;
-  const presentes = await agentesPresentes(serial);
+  let presentes = await agentesPresentes(serial);
   if (!presentes.length) {
     throw new Error(`ningún agente de UI instalado (se buscaron: ${agentes.map(a => a.paquete).join(', ')})`);
   }
 
-  // Se prueba cada agente presente en orden de preferencia: primero tal cual,
-  // y si no contesta se le despierta y se reintenta.
+  const propioHabilitado = await paquetePropioHabilitado(serial, presentes);
+  const uiAutomation = propioHabilitado ? await uiAutomationActiva(serial) : false;
+  const previa = sesiones.get(serial);
+
+  // Una sesión solo puede reutilizarse si su paquete sigue autorizado por la
+  // política vigente. El arranque normal nunca acepta un lector externo.
+  const previaPermitida = previa && presentes.some(a =>
+    a.paquete === previa.paquete && a.puertoRemoto === previa.puertoRemoto
+      && (a.propio !== false || permitirAgentesExternos));
+  if (previa && !previaPermitida) {
+    sesiones.delete(serial);
+  } else if (previa && await ping(previa.puerto)) {
+    return previa.puerto;
+  }
+
+  const puerto = previa?.puerto || siguientePuerto++;
+  if (propioHabilitado && !uiAutomation) presentes = presentes.filter(a => a.propio);
+
+  // Se prueba cada agente autorizado en orden: primero tal cual y, si no
+  // contesta, se le despierta y se reintenta. En el inicio normal la lista solo
+  // contiene paquetes XSAlpha.
   for (const agente of presentes) {
     try {
       await enlazar(serial, puerto, agente.puertoRemoto);
@@ -107,6 +174,8 @@ async function asegurar(serial) {
       return puerto;
     }
 
+    if (uiAutomation) continue;
+
     await arrancarAgente(serial, agente);
     if (await ping(puerto)) {
       sesiones.set(serial, { puerto, paquete: agente.paquete, puertoRemoto: agente.puertoRemoto });
@@ -114,7 +183,10 @@ async function asegurar(serial) {
     }
   }
 
-  throw new Error(`ningún agente respondió (probados: ${presentes.map(a => `${a.paquete}:${a.puertoRemoto}`).join(', ')})`);
+  const detalle = propioHabilitado
+    ? `; XSAlpha (${propioHabilitado}) está habilitado: cierre cualquier sesión UiAutomation externa para liberarlo`
+    : '';
+  throw new Error(`ningún agente respondió (probados: ${presentes.map(a => `${a.paquete}:${a.puertoRemoto}`).join(', ')})${detalle}`);
 }
 
 async function jsonrpc(puerto, method, params = [], timeout = 25000) {
@@ -145,7 +217,7 @@ function olvidar(serial) { sesiones.delete(serial); }
 
 // ------------------------------------------------ instalación automática
 
-// Los dos paquetes que puede tener el Agente Bsolutions: la compilación de
+// Los dos paquetes que puede tener el XSAlpha Agent: la compilación de
 // depuración añade el sufijo .debug a su applicationId.
 const PAQUETES_PROPIOS = ['dev.mcp.agent', 'dev.mcp.agent.debug'];
 
@@ -162,10 +234,11 @@ const CONFIG_APK = { ruta: null, wsPort: 6011 };
 function rutaApkAgente() {
   const candidatos = [
     CONFIG_APK.ruta,
-    process.resourcesPath && path.join(process.resourcesPath, 'agent', 'mcp-agent.apk'),
-    path.resolve(__dirname, '..', 'vendor', 'agent', 'mcp-agent.apk'),
-    path.resolve(__dirname, '..', '..', 'android-agent', 'mcp-agent-release.apk'),
     path.resolve(__dirname, '..', '..', 'android-agent', 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk'),
+    path.resolve(__dirname, '..', '..', 'android-agent', 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk'),
+    path.resolve(__dirname, '..', '..', 'android-agent', 'mcp-agent-release.apk'),
+    path.resolve(__dirname, '..', 'vendor', 'agent', 'mcp-agent.apk'),
+    process.resourcesPath && path.join(process.resourcesPath, 'agent', 'mcp-agent.apk'),
   ].filter(Boolean);
   for (const c of candidatos) { try { if (fs.existsSync(c)) return c; } catch (_) {} }
   return null;
@@ -192,29 +265,49 @@ async function estadoEnDispositivo(serial) {
     'enabled_accessibility_services']).catch(() => '');
   const accesibilidad = !!instalado && concedidos.includes(`${instalado}/`);
 
-  return { instalado, paquete: instalado, version, accesibilidad };
+  // Android can keep a service in the enabled list while a UiAutomation owner
+  // suppresses it. That looks "enabled" in Settings but the agent process and
+  // HTTP endpoint never start. Report the states separately so the MCP does not
+  // claim the integration is healthy while TikMatrix owns screen automation.
+  const accessibilityDump = instalado
+    ? await adbCmd(['-s', serial, 'shell', 'dumpsys', 'accessibility'], 20000).catch(() => '')
+    : '';
+  const runtimeState = accessibilityRuntimeState(accessibilityDump, instalado);
+  const accesibilidad_vinculada = runtimeState.bound;
+  const ui_automation_activa = runtimeState.uiAutomation;
+  const listo = !!instalado && accesibilidad && accesibilidad_vinculada && !ui_automation_activa;
+
+  return {
+    instalado,
+    paquete: instalado,
+    version,
+    accesibilidad,
+    accesibilidad_vinculada,
+    ui_automation_activa,
+    listo,
+  };
 }
 
 // Detecta si al teléfono le falta el agente y lo instala. Devuelve qué pasó, para
 // que quien llame pueda informarlo sin volver a consultar.
-async function instalarSiFalta(serial) {
+async function instalar(serial, { forzar = false } = {}) {
   const estado = await estadoEnDispositivo(serial);
-  if (estado.instalado) {
+  if (estado.instalado && !forzar) {
     return { accion: 'ya_instalado', ...estado };
   }
 
   const previo = intentados.get(serial) || { veces: 0 };
-  if (previo.veces >= MAX_INTENTOS) {
+  if (!forzar && previo.veces >= MAX_INTENTOS) {
     return { accion: 'omitido', motivo: `ya se intentó ${previo.veces} veces sin éxito`, ...estado };
   }
 
   const apk = rutaApkAgente();
   if (!apk) {
     intentados.set(serial, { veces: MAX_INTENTOS, ultimo: Date.now() });
-    return { accion: 'sin_apk', motivo: 'no se encontró el APK del Agente Bsolutions', ...estado };
+    return { accion: 'sin_apk', motivo: 'no se encontró el APK del XSAlpha Agent', ...estado };
   }
 
-  intentados.set(serial, { veces: previo.veces + 1, ultimo: Date.now() });
+  if (!forzar) intentados.set(serial, { veces: previo.veces + 1, ultimo: Date.now() });
 
   // -g concede de golpe los permisos declarados; la accesibilidad NO entra ahí,
   // por diseño de Android: esa la tiene que activar una persona.
@@ -222,13 +315,28 @@ async function instalarSiFalta(serial) {
     .catch(e => String(e.message || ''));
 
   if (!/Success/i.test(salida)) {
-    return { accion: 'fallo', motivo: salida.trim().split('\n')[0] || 'instalación rechazada', ...estado };
+    const firma = /signatures do not match|INSTALL_FAILED_UPDATE_INCOMPATIBLE/i.test(salida);
+    return {
+      accion: 'fallo',
+      motivo: firma
+        ? 'APK signature mismatch; nothing was uninstalled (explicit approval required)'
+        : (salida.trim().split('\n')[0] || 'installation rejected'),
+      ...estado,
+    };
   }
 
   intentados.delete(serial);
   const nuevo = await estadoEnDispositivo(serial);
   const aprovisionado = await aprovisionar(serial, nuevo.paquete);
-  return { accion: 'instalado', aprovisionado, ...nuevo };
+  return { accion: estado.instalado ? 'actualizado' : 'instalado', aprovisionado, ...nuevo };
+}
+
+async function instalarSiFalta(serial) {
+  return instalar(serial, { forzar: false });
+}
+
+async function instalarAhora(serial) {
+  return instalar(serial, { forzar: true });
 }
 
 // Le dice al agente recién instalado a qué servidor apuntar y con qué serial
@@ -259,5 +367,6 @@ function configurarApk({ ruta, wsPort } = {}) {
 
 module.exports = {
   init, dump, disponible, asegurar, jsonrpc, olvidar, AGENTES_POR_DEFECTO,
-  estadoEnDispositivo, instalarSiFalta, configurarApk, rutaApkAgente, PAQUETES_PROPIOS,
+  estadoEnDispositivo, instalarSiFalta, instalarAhora, configurarApk, rutaApkAgente, PAQUETES_PROPIOS,
+  boundServicesSection, accessibilityRuntimeState,
 };

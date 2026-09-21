@@ -1,4 +1,4 @@
-mcp-agent.apk — Agente Bsolutions para Android
+mcp-agent.apk — XSAlpha Agent para Android
 Parte de este proyecto; el código fuente está en android-agent/.
 
 Compilación de RELEASE: 2,3 MB frente a los 6,3 MB de la de depuración (R8 recorta

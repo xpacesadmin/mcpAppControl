@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const maintenance = require('../adb/maintenance');
+const adb = require('../adb');
 
 function createShell(initial = {}, failKey = '') {
   const settings = new Map(Object.entries(initial));
@@ -88,6 +89,56 @@ test('stabilizer reports partial ADB failures instead of false success', async (
   assert.equal(result.data.checks.animations, false);
 });
 
+test('stabilizer accepts Samsung exit 255 only when clock read-back verifies the change', async () => {
+  const adb = createShell();
+  const baseShell = adb.shell;
+  const shell = async (serial, args) => {
+    const output = await baseShell(serial, args);
+    if (args.slice(0, 3).join(' ') === 'cmd alarm set-time') {
+      throw new Error('Set time failed (adb exit 255)');
+    }
+    return output;
+  };
+
+  const result = await maintenance.stabilizeDevice('USB-SAMSUNG', {
+    sync_time: true,
+    clock_source: 'host',
+    timezone: 'America/Chicago',
+  }, shell);
+
+  assert.equal(result.success, true);
+  assert.equal(result.data.checks.clock, true);
+  const clockOperation = result.data.operations.find(item => item.key === 'host_clock');
+  assert.equal(clockOperation.success, false);
+  assert.equal(clockOperation.effective_success, true);
+  assert.equal(clockOperation.verified_by_readback, true);
+  assert.match(result.message, /validada\(s\) por lectura/);
+});
+
+test('stabilizer keeps a set-time error fatal when clock read-back does not verify it', async () => {
+  const adb = createShell({ 'device.epoch_seconds': 0 });
+  const baseShell = adb.shell;
+  const shell = async (serial, args) => {
+    if (args.slice(0, 3).join(' ') === 'cmd alarm set-time') {
+      throw new Error('Set time failed (adb exit 255)');
+    }
+    return baseShell(serial, args);
+  };
+
+  const result = await maintenance.stabilizeDevice('USB-BAD-CLOCK', {
+    sync_time: true,
+    clock_source: 'host',
+    timezone: 'America/Chicago',
+  }, shell);
+
+  assert.equal(result.success, false);
+  assert.equal(result.data.checks.clock, false);
+  const clockOperation = result.data.operations.find(item => item.key === 'host_clock');
+  assert.equal(clockOperation.success, false);
+  assert.equal(clockOperation.effective_success, false);
+  assert.equal(clockOperation.verified_by_readback, undefined);
+});
+
 test('proxy operations remove stale credentials and verify final state', async () => {
   const adb = createShell({
     'global.global_http_proxy_username': 'old-user',
@@ -104,4 +155,23 @@ test('proxy operations remove stale credentials and verify final state', async (
   assert.equal(cleared.success, true);
   assert.equal(cleared.data.proxy, null);
   assert.equal(adb.settings.has('global.http_proxy'), false);
+});
+
+test('launcher app parser tolerates indented Android 9 output and ignores noise', () => {
+  const output = `27 activities found:
+  Activity #0:
+    priority=500 preferredOrder=0 match=0x108000
+    com.google.android.gm/.ConversationListActivityGmail
+  Activity #1:
+    com.zhiliaoapp.musically/com.ss.android.ugc.aweme.splash.SplashActivity
+  Activity #2:
+    com.google.android.gm/.ConversationListActivityGmail
+    not-a-component
+    Resolver table:`;
+
+  assert.deepEqual(adb._parseLaunchablePackages(output), [
+    'com.google.android.gm',
+    'com.zhiliaoapp.musically',
+  ]);
+  assert.deepEqual(adb._parseLaunchablePackages('No activities found'), []);
 });

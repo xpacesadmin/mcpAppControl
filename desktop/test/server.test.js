@@ -102,6 +102,42 @@ test('embedded server migrates its schema and protects paginated API routes', as
   assert.equal(batch.data.ok, 1);
   assert.equal(batch.data.results[0].data.serial, 'TEST-DEVICE-1');
 
+  const stamp = dbServer.now();
+  const workflow = db.run(
+    `INSERT INTO workflows(name,steps,execution_options,status,created_at,updated_at)
+     VALUES (?,?,?,?,?,?)`,
+    ['Retry scope', '[]', JSON.stringify({ pace: 'careful', lock_portrait: true }), 'active', stamp, stamp],
+  );
+  const originalTask = db.run(
+    `INSERT INTO tasks(external_id,workflow_id,params,status,created_at,updated_at)
+     VALUES (?,?,?,?,?,?)`,
+    ['retry-source', workflow.lastInsertRowid, JSON.stringify({ topic: 'saved' }), 'failed', stamp, stamp],
+  );
+  db.run(
+    `INSERT INTO task_assignments(task_id,device_id,device_serial,status,created_at,updated_at)
+     VALUES (?,?,?,?,?,?)`,
+    [originalTask.lastInsertRowid, 1, 'TEST-DEVICE-1', 'failed', stamp, stamp],
+  );
+  const originalDispatchWorkflow = logic.dispatchWorkflow;
+  let retryOptions = null;
+  logic.dispatchWorkflow = async (_workflow, options) => {
+    retryOptions = options;
+    return { task: { id: 999 }, devices_assigned: options.deviceIds.length, message: 'ok' };
+  };
+  try {
+    const retryResponse = await fetch(`${baseUrl}/tasks/${originalTask.lastInsertRowid}/retry`, {
+      method: 'POST', headers, body: '{}',
+    });
+    const retry = await retryResponse.json();
+    assert.equal(retryResponse.status, 201);
+    assert.equal(retry.success, true);
+    assert.deepEqual(retryOptions.deviceIds, [1]);
+    assert.equal(retryOptions.params.topic, 'saved');
+    assert.equal(retryOptions.executionOptions.pace, 'careful');
+  } finally {
+    logic.dispatchWorkflow = originalDispatchWorkflow;
+  }
+
   const createdProxyResponse = await fetch(`${baseUrl}/proxies`, {
     method: 'POST',
     headers,
