@@ -12,6 +12,8 @@ const tiktok = require('./tiktok');
 const agent = require('./agent');
 const spotify = require('./spotify');
 const twitch = require('./twitch');
+const mediaSession = require('./media_session');
+const ytmusic = require('./ytmusic');
 let settings = null; try { settings = require('../server/settings'); } catch (_) {}
 const HJ = (x, y) => settings ? settings.jitterXY(x, y) : { x, y };
 const HD = (ms) => settings ? settings.varyDuration(ms) : ms;
@@ -29,6 +31,7 @@ let CONFIG = {
 const PLATFORM_PACKAGES = {
   tiktok: 'com.zhiliaoapp.musically',
   youtube: 'com.google.android.youtube',
+  ytmusic: 'com.google.android.apps.youtube.music',
   instagram: 'com.instagram.android',
   twitter: 'com.twitter.android',
   general: null,
@@ -625,6 +628,28 @@ async function execute(serial, command, params) {
     }
   }
 
+  if (mediaSession.handles(command)) {
+    const script = createScriptContext(serial);
+    try {
+      return await mediaSession.run(script.ctx, serial, command, p);
+    } catch (e) {
+      return { success: false, message: `${command}: ${e.message}` };
+    } finally {
+      script.finish();
+    }
+  }
+
+  if (ytmusic.handles(command)) {
+    const script = createScriptContext(serial);
+    try {
+      return await ytmusic.run(script.ctx, serial, command, p);
+    } catch (e) {
+      return { success: false, message: `${command}: ${e.message}` };
+    } finally {
+      script.finish();
+    }
+  }
+
   try {
     switch (command) {
       // Acepta package_name y packageName: las rutinas usan una forma y el panel
@@ -933,6 +958,30 @@ async function execute(serial, command, params) {
       // ---- XSALPHA AGENT EN EL DISPOSITIVO ----
       // The legacy alias remains for saved routines. Both commands install only
       // the project APK: no third-party readers, IME changes, or auto-uninstall.
+      case 'INSTALL_AGENT_IF_MISSING': {
+        const r = await agent.instalarSiFalta(serial);
+        const data = {
+          accion: r.accion,
+          paquete: r.paquete || null,
+          version: r.version || null,
+          accesibilidad: !!r.accesibilidad,
+          accesibilidad_vinculada: !!r.accesibilidad_vinculada,
+          ui_automation_activa: !!r.ui_automation_activa,
+          listo: !!r.listo,
+          aprovisionado: !!r.aprovisionado,
+        };
+        if (r.accion === 'ya_instalado') {
+          return { success: true, message: `XSAlpha Agent ya estaba instalado (${r.version || r.paquete || 'versión desconocida'}); no se reinstaló`, data };
+        }
+        if (r.accion === 'instalado') {
+          return { success: true, message: `XSAlpha Agent instalado (${r.version || r.paquete || 'disponible'})`, data };
+        }
+        if (r.accion === 'sin_apk' || r.accion === 'fallo' || r.accion === 'omitido') {
+          return { success: false, message: r.motivo || `Instalación omitida: ${r.accion}`, data };
+        }
+        return { success: false, message: `Estado de instalación inesperado: ${r.accion || 'desconocido'}`, data };
+      }
+
       case 'INSTALL_AGENT':
       case 'TIKTOK_INSTALL_AGENT': {
         const r = await agent.instalarAhora(serial);
@@ -984,6 +1033,29 @@ async function execute(serial, command, params) {
           message: partes.join(' · '),
           data: e,
         };
+      }
+
+      case 'AGENT_PING': {
+        const state = await agent.comprobarReadiness(serial);
+        const blockers = [];
+        if (!state.installed) blockers.push('no instalado');
+        else {
+          if (!state.accessibility_enabled) blockers.push('accesibilidad desactivada');
+          if (!state.accessibility_bound) blockers.push('servicio no vinculado');
+          if (state.external_ui_automation) blockers.push('UiAutomation externa activa');
+          if (!state.endpoint_reachable) blockers.push('endpoint /ping sin respuesta');
+        }
+        return {
+          success: state.ready,
+          message: state.ready ? 'XSAlpha Agent listo y /ping responde' : `XSAlpha Agent no listo: ${blockers.join(', ')}`,
+          data: state,
+        };
+      }
+
+      case 'AGENT_ACCESSIBILITY_ON':
+      case 'AGENT_ACCESSIBILITY_OFF': {
+        if (p.confirm !== true) return { success: false, message: 'confirm=true requerido para XSAlpha' };
+        return agent.setAccessibility(serial, command === 'AGENT_ACCESSIBILITY_ON');
       }
 
       case 'TIKTOK_SET_TEXT': {
@@ -1327,7 +1399,7 @@ async function execute(serial, command, params) {
       case 'CHECK_ACCOUNTS': {
         const out = String(await shell(serial, ['dumpsys', 'account']) || '');
         const by_type = {};
-        // Formato de dumpsys: "Account {name=correo@gmail.com, type=com.google}"
+        // Formato de dumpsys: "Account {name=correo@example.com, type=com.google}"
         const re = /Account\s*\{\s*name=([^,}]+?)\s*,\s*type=([^,}]+?)\s*\}/g;
         let m;
         while ((m = re.exec(out))) {

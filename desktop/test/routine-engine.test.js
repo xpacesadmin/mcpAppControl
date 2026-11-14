@@ -4,6 +4,7 @@ const test = require('node:test');
 const dbServer = require('../server/db');
 const labControl = require('../server/lab_control');
 const logic = require('../server/logic');
+const proxyRoutes = require('../server/proxy_routes');
 
 test('routine parameters resolve recursively and preserve numeric values', () => {
   const resolved = logic.resolveRoutineVars({
@@ -142,6 +143,151 @@ test('long workflow waits react to task cancellation without waiting for timeout
   assert.equal(result.success, false);
   assert.equal(result.cancelled, true);
   assert.ok(Date.now() - started < 1000);
+});
+
+test('route-aware stabilization uses the verified Orem route timezone and persists it', async t => {
+  const db = await dbServer.open(':memory:');
+  t.after(() => db.close());
+  const stamp = dbServer.now();
+  db.run(
+    `INSERT INTO devices(id,name,serial_number,adb_serial,status,proxy_host,proxy_port,proxy_enabled,timezone,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    [1, 'Fleet 1', 'TEST-DEVICE', 'TEST-DEVICE', 'online', '192.168.52.10', 8201, 1, 'America/Chicago', stamp, stamp],
+  );
+  db.run(
+    `INSERT INTO proxy_routes(
+       route_id,provider,internal_host,internal_port,protocol,country,region,city,classification,
+       expected_public_ip,assigned_device_id,assigned_fleet_vlan,health_state,observed_public_ip,
+       last_verification_time,created_at,updated_at
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      'fleet60-fleet1-dc01', 'test-provider', '192.168.52.10', 8201, 'HTTP', 'US', 'Utah', 'Orem',
+      'dedicated_static', '203.0.113.10', 1, 60, 'verified', '203.0.113.10', stamp, stamp, stamp,
+    ],
+  );
+  db.run(
+    `INSERT INTO proxy_route_assignments(
+       route_id,device_id,state,active,idempotency_key,assigned_at,created_at,updated_at
+     ) VALUES (?,?,?,?,?,?,?,?)`,
+    ['fleet60-fleet1-dc01', 1, 'active', 1, 'test-orem-assignment', stamp, stamp, stamp],
+  );
+
+  const calls = [];
+  logic.init(db, 6011, {
+    dispatch: async (serial, command, params) => {
+      calls.push({ serial, command, params });
+      if (command === 'GET_PROXY') {
+        return { success: true, data: { proxy: '192.168.52.10:8201' }, message: 'proxy read' };
+      }
+      return { success: true, data: { applied: true }, message: 'stabilized' };
+    },
+  });
+  proxyRoutes.init(db);
+  labControl.configure({ confirm: true, lab_mode_enabled: false, hermes_enabled: false });
+
+  const device = db.get('SELECT * FROM devices WHERE id=1');
+  const result = await logic.executeStep(device, { type: 'DEVICE_STABILIZE', sync_time: true });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(calls.map(call => call.command), ['GET_PROXY', 'DEVICE_STABILIZE']);
+  assert.equal(calls[1].params.timezone, 'America/Denver');
+  assert.equal(calls[1].params.timezone_source, 'proxy_route');
+  assert.equal(result.data.timezone_resolution.route_id, 'fleet60-fleet1-dc01');
+  assert.equal(result.data.timezone_resolution.city, 'Orem');
+  assert.equal(result.data.timezone_resolution.timezone, 'America/Denver');
+  assert.equal(result.data.timezone_resolution.binding, 'verified_android_global_proxy');
+  const persisted = db.get('SELECT timezone,time_synced_at FROM devices WHERE id=1');
+  assert.equal(persisted.timezone, 'America/Denver');
+  assert.ok(persisted.time_synced_at);
+});
+
+test('route-aware stabilization rejects a conflicting explicit timezone without dispatch', async t => {
+  const db = await dbServer.open(':memory:');
+  t.after(() => db.close());
+  const stamp = dbServer.now();
+  db.run(
+    `INSERT INTO devices(id,name,serial_number,adb_serial,status,proxy_enabled,timezone,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+    [1, 'Fleet 1', 'TEST-DEVICE', 'TEST-DEVICE', 'online', 0, 'America/Chicago', stamp, stamp],
+  );
+  db.run(
+    `INSERT INTO proxy_routes(
+       route_id,provider,internal_host,internal_port,protocol,country,region,city,classification,
+       expected_public_ip,assigned_device_id,assigned_fleet_vlan,health_state,observed_public_ip,
+       last_verification_time,created_at,updated_at
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      'fleet60-fleet1-dc01', 'test-provider', '192.168.52.10', 8201, 'HTTP', 'US', 'Utah', 'Orem',
+      'dedicated_static', '203.0.113.10', 1, 60, 'verified', '203.0.113.10', stamp, stamp, stamp,
+    ],
+  );
+  db.run(
+    `INSERT INTO proxy_route_assignments(
+       route_id,device_id,state,active,idempotency_key,assigned_at,created_at,updated_at
+     ) VALUES (?,?,?,?,?,?,?,?)`,
+    ['fleet60-fleet1-dc01', 1, 'active', 1, 'test-conflict-assignment', stamp, stamp, stamp],
+  );
+
+  const calls = [];
+  logic.init(db, 6011, { dispatch: async (...args) => { calls.push(args); return { success: true }; } });
+  proxyRoutes.init(db);
+  labControl.configure({ confirm: true, lab_mode_enabled: false, hermes_enabled: false });
+
+  const result = await logic.executeStep(
+    db.get('SELECT * FROM devices WHERE id=1'),
+    { type: 'DEVICE_STABILIZE', timezone: 'America/Los_Angeles' },
+  );
+
+  assert.equal(result.success, false);
+  assert.match(result.message, /no coincide.*America\/Denver/i);
+  assert.deepEqual(calls, []);
+  assert.equal(db.get('SELECT timezone FROM devices WHERE id=1').timezone, 'America/Chicago');
+});
+
+test('route-aware stabilization fails closed when route geography is missing or unsupported', async t => {
+  const db = await dbServer.open(':memory:');
+  t.after(() => db.close());
+  const stamp = dbServer.now();
+  db.run(
+    `INSERT INTO devices(id,name,serial_number,adb_serial,status,proxy_enabled,timezone,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+    [1, 'Fleet 1', 'TEST-DEVICE', 'TEST-DEVICE', 'online', 0, 'America/Chicago', stamp, stamp],
+  );
+  db.run(
+    `INSERT INTO proxy_routes(
+       route_id,provider,internal_host,internal_port,protocol,country,region,city,classification,
+       expected_public_ip,assigned_device_id,assigned_fleet_vlan,health_state,observed_public_ip,
+       last_verification_time,created_at,updated_at
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      'fleet60-fleet1-dc01', 'test-provider', '192.168.52.10', 8201, 'HTTP', 'US', null, null,
+      'dedicated_static', '203.0.113.10', 1, 60, 'verified', '203.0.113.10', stamp, stamp, stamp,
+    ],
+  );
+  db.run(
+    `INSERT INTO proxy_route_assignments(
+       route_id,device_id,state,active,idempotency_key,assigned_at,created_at,updated_at
+     ) VALUES (?,?,?,?,?,?,?,?)`,
+    ['fleet60-fleet1-dc01', 1, 'active', 1, 'test-missing-geo-assignment', stamp, stamp, stamp],
+  );
+
+  const calls = [];
+  logic.init(db, 6011, { dispatch: async (...args) => { calls.push(args); return { success: true }; } });
+  proxyRoutes.init(db);
+  labControl.configure({ confirm: true, lab_mode_enabled: false, hermes_enabled: false });
+
+  const device = db.get('SELECT * FROM devices WHERE id=1');
+  const missing = await logic.executeStep(device, { type: 'DEVICE_STABILIZE' });
+  assert.equal(missing.success, false);
+  assert.match(missing.message, /Zona horaria bloqueada.*Geografía de ruta no compatible/i);
+  assert.deepEqual(calls, []);
+
+  db.run("UPDATE proxy_routes SET region='Nevada',city='Las Vegas' WHERE route_id='fleet60-fleet1-dc01'");
+  const unsupported = await logic.executeStep(device, { type: 'DEVICE_STABILIZE' });
+  assert.equal(unsupported.success, false);
+  assert.match(unsupported.message, /Zona horaria bloqueada.*Geografía de ruta no compatible/i);
+  assert.deepEqual(calls, []);
+  assert.equal(db.get('SELECT timezone FROM devices WHERE id=1').timezone, 'America/Chicago');
 });
 
 test('routine-safe cross-app steps validate with bounded values', async t => {

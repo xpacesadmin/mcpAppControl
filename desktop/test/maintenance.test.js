@@ -35,6 +35,9 @@ function createShell(initial = {}, failKey = '') {
     if (args[0] === 'getprop' && args[1] === 'persist.sys.timezone') {
       return settings.get('device.timezone') ?? 'America/Santo_Domingo';
     }
+    if (args[0] === 'getprop' && args[1] === 'persist.sys.locale') {
+      return settings.get('device.locale') ?? 'en-US';
+    }
     if (args[0] === 'date' && args[1] === '+%s') {
       return String(settings.get('device.epoch_seconds') ?? Math.floor(Date.now() / 1000));
     }
@@ -72,6 +75,7 @@ test('stabilizer validates input and verifies every setting', async () => {
     screen_timeout: true,
     animations: true,
     timezone: true,
+    locale: true,
     clock: true,
   });
   assert.ok(result.data.clock_drift_seconds <= 10);
@@ -87,6 +91,16 @@ test('stabilizer reports partial ADB failures instead of false success', async (
   assert.match(result.message, /Estabilización incompleta/);
   assert.equal(result.data.operations.find(item => item.key === 'window_animation').success, false);
   assert.equal(result.data.checks.animations, false);
+});
+
+test('stabilizer reports a route language mismatch without claiming success', async () => {
+  const adb = createShell({ 'device.locale': 'es-US' });
+  const result = await maintenance.stabilizeDevice('USB-LOCALE', {
+    timezone: 'America/Denver', locale: 'en-US',
+  }, adb.shell);
+  assert.equal(result.success, false);
+  assert.equal(result.data.state.locale, 'es-US');
+  assert.equal(result.data.checks.locale, false);
 });
 
 test('stabilizer accepts Samsung exit 255 only when clock read-back verifies the change', async () => {

@@ -105,6 +105,8 @@ const COMANDOS_LARGOS = new RegExp(
   'SPOTIFY_(WARMUP|STREAM_CAMPAIGN|PLAY_URL|SEARCH_PLAY|FOLLOW_ARTIST|LOGIN)' +
   '|' +
   'TWITCH_(WARMUP|WATCH_STREAM|WATCH_CAMPAIGN|FOLLOW_CHANNEL|UNFOLLOW_CHANNEL|CHAT_MESSAGE|LOGIN)' +
+  '|' +
+  'YTMUSIC_(CREATE_PLAYLIST|CREATE_PLAYLIST_FROM_TRACKS)' +
   ')$');
 
 function dispatchTimeout(command) {
@@ -180,6 +182,68 @@ async function executeStep(device, step, runtime = {}) {
       case 'CHECK_IP': {
         const proxies = require('./proxies');
         return norm(await proxies.checkIp(device), 'IP de salida comprobada');
+      }
+
+      case 'DEVICE_STABILIZE': {
+        const proxyRoutes = require('./proxy_routes');
+        const source = String(step.timezone_source || 'proxy_route').trim().toLowerCase();
+        if (!['proxy_route', 'assigned_route'].includes(source)) {
+          return { success: false, message: 'La estabilización requiere timezone_source=proxy_route', data: null };
+        }
+
+        let context;
+        try { context = proxyRoutes.resolveDeviceRouteContext(device.id); }
+        catch (error) {
+          return { success: false, message: `Zona horaria bloqueada: ${error.message}`, data: null };
+        }
+        if (step.timezone && String(step.timezone).trim() !== context.timezone) {
+          return {
+            success: false,
+            message: `Zona horaria ${step.timezone} no coincide con ${context.timezone} para ${context.route.city}, ${context.route.region}`,
+            data: null,
+          };
+        }
+        if (step.locale && String(step.locale).trim() !== context.locale) {
+          return { success: false, message: `Idioma ${step.locale} no coincide con ${context.locale} para la ruta asignada`, data: null };
+        }
+
+        const expectedProxy = `${context.route.internal_endpoint.host}:${context.route.internal_endpoint.port}`;
+        let binding = 'verified_route_assignment';
+        if (Number(device.proxy_enabled) === 1) {
+          const proxyState = await routerDispatch(device.serial_number, 'GET_PROXY', {});
+          const observedProxy = proxyState && proxyState.data ? String(proxyState.data.proxy || '').trim() : '';
+          if (!proxyState || !proxyState.success || observedProxy !== expectedProxy) {
+            return {
+              success: false,
+              message: `Zona horaria bloqueada: el proxy Android actual no coincide con la ruta asignada (${observedProxy || 'sin proxy'} != ${expectedProxy})`,
+              data: null,
+            };
+          }
+          binding = 'verified_android_global_proxy';
+        }
+
+        const params = { ...step, timezone: context.timezone, timezone_source: 'proxy_route', locale: context.locale };
+        delete params.type;
+        const result = norm(
+          await routerDispatch(device.serial_number, 'DEVICE_STABILIZE', params),
+          'Dispositivo estabilizado con la zona horaria de su ruta',
+        );
+        const resolution = {
+          source: 'assigned_proxy_route',
+          binding,
+          route_id: context.route.route_id,
+          city: context.route.city,
+          region: context.route.region,
+          timezone: context.timezone,
+          locale: context.locale,
+        };
+        result.data = { ...(result.data || {}), timezone_resolution: resolution };
+        if (result.success) {
+          DB.run('UPDATE devices SET timezone=?,time_synced_at=?,updated_at=? WHERE id=?',
+            [context.timezone, now(), now(), device.id]);
+          result.message = `${result.message}; ${context.route.city}, ${context.route.region} → ${context.timezone}`;
+        }
+        return result;
       }
 
       case 'WAIT_FOR_TEXT': {

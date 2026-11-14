@@ -129,8 +129,12 @@ function boundServicesSection(accessibilityDump) {
 function accessibilityRuntimeState(accessibilityDump, installedPackage) {
   const packageName = String(installedPackage || '').toLowerCase();
   const bound = boundServicesSection(accessibilityDump).toLowerCase();
+  const escapedPackage = packageName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Samsung Android 9 prints bound entries as Service[..., packageName=pkg, ...]
+  // rather than pkg/class. Restrict the match to the Bound services section.
+  const packageField = packageName && new RegExp(`\\bpackagename\\s*=\\s*${escapedPackage}(?=[,\\s\\]\\}]|$)`, 'i');
   return {
-    bound: !!packageName && bound.includes(`${packageName}/`),
+    bound: !!packageName && (bound.includes(`${packageName}/`) || packageField.test(bound)),
     uiAutomation: /\bUi Automation\s*\[/i.test(String(accessibilityDump || '')),
   };
 }
@@ -213,6 +217,96 @@ async function disponible(serial) {
   try { await asegurar(serial); return true; } catch (_) { return false; }
 }
 
+function readinessSummary(estado = {}, endpointReachable = false) {
+  const endpoint_reachable = endpointReachable === true;
+  return {
+    installed: !!estado.instalado,
+    version: estado.version || null,
+    accessibility_enabled: !!estado.accesibilidad,
+    accessibility_bound: !!estado.accesibilidad_vinculada,
+    external_ui_automation: !!estado.ui_automation_activa,
+    endpoint_reachable,
+    ready: !!estado.listo && endpoint_reachable,
+  };
+}
+
+// Comprueba únicamente el endpoint /ping del XSAlpha instalado. No despierta la
+// app, no lee la jerarquía de pantalla y retira el forward temporal al terminar.
+async function comprobarReadiness(serial) {
+  const estado = await estadoEnDispositivo(serial);
+  if (!estado.instalado) return readinessSummary(estado, false);
+
+  const previa = sesiones.get(serial);
+  if (previa && previa.paquete === estado.paquete && await ping(previa.puerto)) {
+    return readinessSummary(estado, true);
+  }
+
+  const candidato = agentes.find(a => a.paquete === estado.paquete && (a.propio !== false || permitirAgentesExternos));
+  if (!candidato) return readinessSummary(estado, false);
+
+  const puerto = siguientePuerto++;
+  let responde = false;
+  try {
+    await enlazar(serial, puerto, candidato.puertoRemoto);
+    responde = await ping(puerto);
+  } catch (_) {
+    responde = false;
+  } finally {
+    await adbCmd(['-s', serial, 'forward', '--remove', `tcp:${puerto}`]).catch(() => {});
+  }
+  return readinessSummary(estado, responde);
+}
+
+// On approved Android 9 lab devices, ADB shell can change this secure setting.
+// Preserve every unrelated service and verify the exact XSAlpha component.
+async function setAccessibility(serial, enabled) {
+  const state = await estadoEnDispositivo(serial);
+  if (!state.instalado || !PAQUETES_PROPIOS.includes(state.paquete)) {
+    return { success: false, message: 'XSAlpha Agent no está instalado', data: { installed: false } };
+  }
+  const component = `${state.paquete}/dev.mcp.agent.MCPAccessibilityService`;
+  const readList = async () => String(await adbCmd([
+    '-s', serial, 'shell', 'settings', 'get', 'secure', 'enabled_accessibility_services',
+  ])).trim();
+  const original = await readList();
+  const entries = original === 'null' || !original ? [] : original.split(':').filter(Boolean);
+  const others = entries.filter(entry => !PAQUETES_PROPIOS.some(pkg => entry.startsWith(`${pkg}/`)));
+  const next = enabled ? [...others, component] : others;
+  const changed = entries.join(':') !== next.join(':');
+  if (changed) {
+    try {
+      await adbCmd(['-s', serial, 'shell', 'settings', 'put', 'secure',
+        'enabled_accessibility_services', next.length ? next.join(':') : 'null']);
+      if (enabled) {
+        await adbCmd(['-s', serial, 'shell', 'settings', 'put', 'secure', 'accessibility_enabled', '1']);
+      }
+    } catch (_) {
+      await adbCmd(['-s', serial, 'shell', 'settings', 'put', 'secure',
+        'enabled_accessibility_services', original || 'null']).catch(() => {});
+      return { success: false, message: 'Android rechazó el cambio de Accesibilidad', data: { installed: true } };
+    }
+  }
+  const actual = await readList();
+  const actualEntries = actual === 'null' || !actual ? [] : actual.split(':').filter(Boolean);
+  const verified = enabled
+    ? actualEntries.includes(component)
+    : !actualEntries.some(entry => PAQUETES_PROPIOS.some(pkg => entry.startsWith(`${pkg}/`)));
+  if (!verified || others.some(entry => !actualEntries.includes(entry))) {
+    await adbCmd(['-s', serial, 'shell', 'settings', 'put', 'secure',
+      'enabled_accessibility_services', original || 'null']).catch(() => {});
+    return { success: false, message: 'No se verificó el cambio; se restauró el ajuste anterior', data: { installed: true } };
+  }
+  olvidar(serial);
+  const readiness = await comprobarReadiness(serial);
+  return {
+    success: true,
+    message: enabled
+      ? (readiness.ready ? 'XSAlpha activado y conectado' : 'XSAlpha habilitado; servicio o endpoint aún no listo')
+      : 'XSAlpha desactivado',
+    data: { enabled, changed, ...readiness },
+  };
+}
+
 function olvidar(serial) { sesiones.delete(serial); }
 
 // ------------------------------------------------ instalación automática
@@ -259,8 +353,8 @@ async function estadoEnDispositivo(serial) {
     version = (info.match(/versionName=([^\s]+)/) || [])[1] || null;
   }
 
-  // El servicio de accesibilidad es un permiso que concede la persona en Ajustes:
-  // no se puede otorgar desde aquí, así que solo se informa.
+  // La app Android no puede concederse este permiso sola. En los Android 9 del
+  // laboratorio, el shell ADB autorizado puede alternar el ajuste por separado.
   const concedidos = await adbCmd(['-s', serial, 'shell', 'settings', 'get', 'secure',
     'enabled_accessibility_services']).catch(() => '');
   const accesibilidad = !!instalado && concedidos.includes(`${instalado}/`);
@@ -368,5 +462,6 @@ function configurarApk({ ruta, wsPort } = {}) {
 module.exports = {
   init, dump, disponible, asegurar, jsonrpc, olvidar, AGENTES_POR_DEFECTO,
   estadoEnDispositivo, instalarSiFalta, instalarAhora, configurarApk, rutaApkAgente, PAQUETES_PROPIOS,
-  boundServicesSection, accessibilityRuntimeState,
+  comprobarReadiness, boundServicesSection, accessibilityRuntimeState, _readinessSummary: readinessSummary,
+  setAccessibility,
 };

@@ -19,6 +19,10 @@ const SAFE_LAB_STEPS = new Set([
   'CHECK_BAN',
   'DEVICE_HEALTH',
   'DEVICE_NETWORK_STATUS',
+  'AGENT_STATUS',
+  'AGENT_PING',
+  'GET_FOREGROUND_APP',
+  'MEDIA_RESUME_IF_PAUSED',
   'CHECK_IP',
   'LIST_PACKAGES',
   'WAIT',
@@ -46,10 +50,15 @@ const CANARY_FULL_STEPS = new Set([
   'PULL_FILE',
   'CLEAR_APP', 'UNINSTALL_APP', 'INSTALL_APK', 'SETTINGS_PUT',
   'REBOOT', 'MONKEY', 'PUSH_FILE',
+  'INSTALL_AGENT_IF_MISSING', 'INSTALL_AGENT', 'TIKTOK_INSTALL_AGENT',
+  'AGENT_ACCESSIBILITY_ON', 'AGENT_ACCESSIBILITY_OFF',
 ]);
 const CONFIRMATION_REQUIRED_STEPS = new Set([
   'CLEAR_APP', 'UNINSTALL_APP', 'INSTALL_APK', 'SETTINGS_PUT',
   'REBOOT', 'MONKEY', 'PUSH_FILE',
+  'INSTALL_AGENT_IF_MISSING', 'INSTALL_AGENT', 'TIKTOK_INSTALL_AGENT',
+  'AGENT_ACCESSIBILITY_ON', 'AGENT_ACCESSIBILITY_OFF',
+  'YTMUSIC_CREATE_PLAYLIST', 'YTMUSIC_CREATE_PLAYLIST_FROM_TRACKS',
 ]);
 
 const SECRET_KEY_RE = /(pass(word)?|token|secret|credential|totp|authorization|cookie|session)/i;
@@ -227,8 +236,8 @@ function validateStep(step, index = 0) {
   const cohortFull = full && configuredLabScope() === 'allowlist';
   const allowed = SAFE_LAB_STEPS.has(type) || cohortFull || (full && CANARY_FULL_STEPS.has(type));
   if (!allowed) errors.push(`Paso ${index + 1}: ${type} no permitido en modo laboratorio`);
-  if (full && CONFIRMATION_REQUIRED_STEPS.has(type) && step.confirm !== true) {
-    errors.push(`Paso ${index + 1}: ${type} requiere confirm=true en modo laboratorio completo`);
+  if (CONFIRMATION_REQUIRED_STEPS.has(type) && step.confirm !== true) {
+    errors.push(`Paso ${index + 1}: ${type} requiere confirm=true`);
   }
   if (type === 'USE_ACCOUNT' && !Number.isInteger(Number(step.account_id))) errors.push(`Paso ${index + 1}: USE_ACCOUNT requiere account_id explícito`);
   if (type === 'OPEN_APP' && !(step.package_name || step.packageName)) errors.push(`Paso ${index + 1}: OPEN_APP requiere package_name`);

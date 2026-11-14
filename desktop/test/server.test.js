@@ -21,7 +21,7 @@ test('embedded server migrates its schema and protects paginated API routes', as
 
   t.after(() => db.close());
 
-  const requiredTables = ['devices', 'accounts', 'proxies', 'proxy_assignments', 'lab_control_state', 'audit_events', 'proxy_routes', 'proxy_route_assignments', 'view_campaigns', 'view_sessions', 'anti_idle_state'];
+  const requiredTables = ['devices', 'accounts', 'proxies', 'proxy_assignments', 'lab_control_state', 'audit_events', 'proxy_routes', 'proxy_route_assignments', 'view_campaigns', 'view_sessions', 'anti_idle_state', 'youtube_music_guard_state', 'youtube_music_guard_devices', 'youtube_music_review_state', 'youtube_music_review_candidates', 'youtube_music_review_observations'];
   for (const table of requiredTables) {
     assert.equal(
       db.get("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name=?", [table]).count,
@@ -83,13 +83,45 @@ test('embedded server migrates its schema and protects paginated API routes', as
   });
   assert.equal(invalidBatchResponse.status, 422);
 
+  for (const command of ['INSTALL_APK', 'INSTALL_AGENT_IF_MISSING', 'INSTALL_AGENT', 'TIKTOK_INSTALL_AGENT']) {
+    const response = await fetch(`${baseUrl}/devices/batch-command`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ device_ids: [1], command, params: {} }),
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 422, `${command} must require explicit confirmation`);
+    assert.match(payload.message, /confirm=true/i);
+  }
+
   const originalExecuteStep = logic.executeStep;
+  for (const params of [{ type: 'INSTALL_APK' }, [], 'invalid']) {
+    const rejected = await fetch(`${baseUrl}/devices/batch-command`, {
+      method: 'POST', headers,
+      body: JSON.stringify({ device_ids: [1], command: 'AGENT_PING', params }),
+    });
+    assert.equal(rejected.status, 422, 'params cannot change the validated command or its confirmation gate');
+  }
   logic.executeStep = async (device, step) => ({
     success: true,
     message: `${step.type} verified`,
     data: { serial: device.serial_number, proxy: null },
   });
   t.after(() => { logic.executeStep = originalExecuteStep; });
+
+  const installIfMissingResponse = await fetch(`${baseUrl}/devices/batch-command`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      device_ids: [1],
+      command: 'INSTALL_AGENT_IF_MISSING',
+      params: { confirm: true },
+    }),
+  });
+  const installIfMissing = await installIfMissingResponse.json();
+  assert.equal(installIfMissingResponse.status, 200);
+  assert.equal(installIfMissing.success, true);
+  assert.equal(installIfMissing.data.results[0].message, 'INSTALL_AGENT_IF_MISSING verified');
 
   const batchResponse = await fetch(`${baseUrl}/devices/batch-command`, {
     method: 'POST',

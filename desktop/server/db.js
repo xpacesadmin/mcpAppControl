@@ -323,6 +323,85 @@ CREATE TABLE IF NOT EXISTS anti_idle_state (
   updated_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS youtube_music_guard_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled INTEGER NOT NULL DEFAULT 0,
+  running INTEGER NOT NULL DEFAULT 0,
+  device_ids TEXT NOT NULL DEFAULT '[]',
+  device_cursor INTEGER NOT NULL DEFAULT 0,
+  poll_interval_seconds INTEGER NOT NULL DEFAULT 30,
+  cooldown_seconds INTEGER NOT NULL DEFAULT 90,
+  batch_size INTEGER NOT NULL DEFAULT 5,
+  active_run_id TEXT,
+  last_run_at TEXT,
+  next_run_at TEXT,
+  last_result TEXT,
+  last_error TEXT,
+  updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS youtube_music_guard_devices (
+  device_id INTEGER PRIMARY KEY,
+  prompt_latched INTEGER NOT NULL DEFAULT 0,
+  last_detected_at TEXT,
+  last_handled_at TEXT,
+  last_result TEXT,
+  last_error TEXT,
+  updated_at TEXT,
+  FOREIGN KEY(device_id) REFERENCES devices(id)
+);
+
+-- Safe YT Music engagement suggestions. These tables intentionally contain no
+-- execution flag or device command: approval means "reviewed for manual action".
+CREATE TABLE IF NOT EXISTS youtube_music_review_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  device_ids TEXT NOT NULL DEFAULT '[]',
+  like_candidate_probability REAL NOT NULL DEFAULT 0.15,
+  comment_candidate_probability REAL NOT NULL DEFAULT 0.05,
+  cooldown_seconds INTEGER NOT NULL DEFAULT 1800,
+  comment_drafts TEXT NOT NULL DEFAULT '[]',
+  updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS youtube_music_review_candidates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  candidate_uuid TEXT NOT NULL UNIQUE,
+  device_id INTEGER NOT NULL,
+  candidate_type TEXT NOT NULL,
+  track_title TEXT,
+  track_artist TEXT,
+  comment_draft TEXT,
+  status TEXT NOT NULL DEFAULT 'pending_review',
+  source TEXT NOT NULL DEFAULT 'operator-observation',
+  observation_key TEXT,
+  generated_at TEXT NOT NULL,
+  reviewed_at TEXT,
+  reviewed_by TEXT,
+  review_note TEXT,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(device_id) REFERENCES devices(id)
+);
+
+CREATE TABLE IF NOT EXISTS youtube_music_review_observations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  observation_key TEXT NOT NULL,
+  device_id INTEGER NOT NULL,
+  track_title TEXT,
+  track_artist TEXT,
+  result TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(device_id) REFERENCES devices(id),
+  UNIQUE(device_id, observation_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ytmusic_review_status
+  ON youtube_music_review_candidates(status, generated_at);
+CREATE INDEX IF NOT EXISTS idx_ytmusic_review_cooldown
+  ON youtube_music_review_candidates(device_id, candidate_type, generated_at);
+CREATE INDEX IF NOT EXISTS idx_ytmusic_review_observation
+  ON youtube_music_review_candidates(observation_key);
+
 CREATE TABLE IF NOT EXISTS view_campaigns (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -629,6 +708,8 @@ function ensureColumns(nativeDb, table, columns) {
 
 function persist(db) {
   if (!db || db.file === ':memory:' || db.closed) return;
+  // sql.js export() ends an open SQLite transaction. Never snapshot mid-transaction.
+  if (db._transactionActive) throw new Error('Cannot persist sql.js while a transaction is active');
   if (db._saveTimer) { clearTimeout(db._saveTimer); db._saveTimer = null; }
   db._firstDirty = 0;
   fs.writeFileSync(db.file, Buffer.from(db.native.export()));
@@ -639,6 +720,7 @@ function persist(db) {
 // se guarda tras 1s de inactividad, y como muy tarde cada 5s bajo escritura continua.
 function scheduleSave(db) {
   if (!db || db.file === ':memory:' || db.closed) return;
+  if (db._transactionActive) return;
   const t = Date.now();
   if (!db._firstDirty) db._firstDirty = t;
   if (t - db._firstDirty >= 5000) { persist(db); return; }   // techo: no acumular >5s
@@ -765,7 +847,15 @@ async function openSqlJs(file = ':memory:') {
     },
     exec(sql) {
       if (this.closed) throw new Error('La base de datos está cerrada');
+      const command = String(sql).trim().toUpperCase();
+      if (/^BEGIN(?:\s|$)/.test(command)) {
+        if (this._saveTimer) { clearTimeout(this._saveTimer); this._saveTimer = null; }
+        native.run(sql);
+        this._transactionActive = true;
+        return;
+      }
       native.run(sql);
+      if (/^(?:COMMIT|ROLLBACK)(?:\s|$)/.test(command)) this._transactionActive = false;
       scheduleSave(this);
     },
     flush() {
@@ -773,6 +863,7 @@ async function openSqlJs(file = ':memory:') {
     },
     _saveTimer: null,
     _firstDirty: 0,
+    _transactionActive: false,
     close() {
       if (this.closed) return;
       persist(this);

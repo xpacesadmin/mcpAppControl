@@ -9,11 +9,56 @@ let APPLY_DEVICE_PROXY = null;
 let RESTORE_DEVICE_PROXY = null;
 let PROBE_DEVICE_ROUTE = null;
 let REQUEST_PROVIDER_ROTATION = null;
+let SWAP_ACTIVE = false;
 
 const PROTOCOLS = new Set(['HTTP', 'HTTPS', 'SOCKS5']);
 const ROUTE_ID_RE = /^[a-z0-9][a-z0-9._-]{2,63}$/;
 const SECRET_KEY_RE = /(pass(word)?|token|secret|credential|totp|authorization)/i;
 const DISABLED_PROXY_VALUES = new Set(['', ':0', 'null']);
+
+function normalizeGeographyValue(value) {
+  return String(value == null ? '' : value).trim().replace(/\s+/g, ' ').toLowerCase();
+}
+const US_CITY_GEOGRAPHY = [
+  { city: 'Orem', region: 'Utah', aliases: ['ut'], timezone: 'America/Denver' },
+  { city: 'San Jose', region: 'California', aliases: ['ca'], timezone: 'America/Los_Angeles' },
+  { city: 'Santa Clara', region: 'California', aliases: ['ca'], timezone: 'America/Los_Angeles' },
+  { city: 'Los Angeles', region: 'California', aliases: ['ca'], timezone: 'America/Los_Angeles' },
+  { city: 'Seattle', region: 'Washington', aliases: ['wa'], timezone: 'America/Los_Angeles' },
+  { city: 'Denver', region: 'Colorado', aliases: ['co'], timezone: 'America/Denver' },
+  { city: 'Chicago', region: 'Illinois', aliases: ['il'], timezone: 'America/Chicago' },
+  { city: 'Dallas', region: 'Texas', aliases: ['tx'], timezone: 'America/Chicago' },
+  { city: 'Miami', region: 'Florida', aliases: ['fl'], timezone: 'America/New_York' },
+  { city: 'New York', region: 'New York', aliases: ['ny'], timezone: 'America/New_York' },
+];
+
+function matchRouteGeography(location = {}) {
+  const city = normalizeGeographyValue(location.city);
+  const region = normalizeGeographyValue(location.region);
+  const country = normalizeGeographyValue(location.country);
+  if (country && !['us', 'usa', 'united states'].includes(country)) {
+    throw new Error('País de ruta no compatible; configure una ubicación de EE. UU. verificada');
+  }
+  const found = US_CITY_GEOGRAPHY.find(entry =>
+    normalizeGeographyValue(entry.city) === city &&
+    [normalizeGeographyValue(entry.region), ...entry.aliases].includes(region));
+  if (!found) throw new Error('Geografía de ruta no compatible; configure ciudad y estado verificados');
+  return found;
+}
+
+function resolveRouteTimezone(location = {}) {
+  return matchRouteGeography(location).timezone;
+}
+
+function resolveRouteLocale(location = {}) {
+  matchRouteGeography(location);
+  return 'en-US';
+}
+
+function canonicalRouteGeography(location = {}) {
+  const entry = matchRouteGeography(location);
+  return { region: entry.region, city: entry.city, timezone: entry.timezone, locale: 'en-US' };
+}
 
 function init(db, options = {}) {
   DB = db;
@@ -42,6 +87,9 @@ function rejectSecrets(input) {
 
 function publicRoute(row) {
   if (!row) return null;
+  let timezone = null;
+  let locale = null;
+  try { timezone = resolveRouteTimezone(row); locale = resolveRouteLocale(row); } catch (_) {}
   return {
     route_id: row.route_id,
     provider: row.provider,
@@ -49,6 +97,8 @@ function publicRoute(row) {
     country: row.country,
     region: row.region,
     city: row.city,
+    timezone,
+    locale,
     classification: row.classification,
     assigned_device_id: row.assigned_device_id,
     assigned_fleet_vlan: row.assigned_fleet_vlan,
@@ -58,6 +108,85 @@ function publicRoute(row) {
     last_verification_time: row.last_verification_time,
     created_at: row.created_at,
     updated_at: row.updated_at,
+  };
+}
+
+function resolveDeviceRouteContext(deviceId) {
+  requireDb();
+  const normalizedDeviceId = Number(deviceId);
+  if (!Number.isInteger(normalizedDeviceId) || normalizedDeviceId <= 0) throw new Error('device_id inválido');
+  const assignments = DB.all(
+    'SELECT * FROM proxy_route_assignments WHERE device_id=? AND active=1 ORDER BY id',
+    [normalizedDeviceId]
+  );
+  if (assignments.length !== 1) {
+    throw new Error(`Se requiere exactamente una asignación de ruta activa; encontradas=${assignments.length}`);
+  }
+  const assignment = assignments[0];
+  const route = DB.get('SELECT * FROM proxy_routes WHERE route_id=?', [assignment.route_id]);
+  if (!route) throw new Error('La asignación activa apunta a una ruta inexistente');
+  if (Number(route.assigned_device_id) !== normalizedDeviceId) {
+    throw new Error('La ruta activa no está asignada al dispositivo esperado');
+  }
+  if (route.health_state !== 'verified') throw new Error('La ruta activa no está verificada');
+  const expectedIp = String(route.expected_public_ip || '').trim();
+  const observedIp = String(route.observed_public_ip || '').trim();
+  if (!expectedIp || !observedIp || expectedIp !== observedIp) {
+    throw new Error('La IP observada de la ruta activa no coincide con la IP esperada');
+  }
+  const timezone = resolveRouteTimezone(route);
+  return { route: publicRoute(route), assignment, timezone, locale: resolveRouteLocale(route) };
+}
+
+function updateGeography(routeId, input = {}) {
+  requireDb();
+  labControl.assertOperational();
+  rejectSecrets(input);
+  if (input.confirm !== true) throw new Error('confirm=true requerido');
+  const normalizedRouteId = String(routeId || '').trim().toLowerCase();
+  if (!ROUTE_ID_RE.test(normalizedRouteId)) throw new Error('route_id inválido');
+  const idempotencyKey = String(input.idempotency_key || '').trim();
+  if (!idempotencyKey) throw new Error('idempotency_key requerido');
+
+  const prior = DB.get('SELECT * FROM audit_events WHERE idempotency_key=?', [idempotencyKey]);
+  if (prior) {
+    if (prior.operation !== 'proxy_route.geography.update' || prior.route_id !== normalizedRouteId) {
+      throw new Error('idempotency_key ya fue usado para otra operación');
+    }
+    const route = DB.get('SELECT * FROM proxy_routes WHERE route_id=?', [normalizedRouteId]);
+    if (!route) throw new Error('Ruta no encontrada');
+    return { route: publicRoute(route), timezone: resolveRouteTimezone(route), locale: resolveRouteLocale(route), idempotent_replay: true };
+  }
+
+  const route = DB.get('SELECT * FROM proxy_routes WHERE route_id=?', [normalizedRouteId]);
+  if (!route) throw new Error('Ruta no encontrada');
+  if (route.health_state !== 'verified') throw new Error('La ruta debe estar verificada antes de guardar su geografía');
+  const expectedIp = String(route.expected_public_ip || '').trim();
+  const observedIp = String(route.observed_public_ip || '').trim();
+  const confirmedIp = String(input.expected_public_ip || '').trim();
+  if (!expectedIp || !observedIp || expectedIp !== observedIp) {
+    throw new Error('La IP observada de la ruta no coincide con la IP esperada');
+  }
+  if (!confirmedIp || confirmedIp !== expectedIp) {
+    throw new Error('expected_public_ip no coincide con la ruta que se está actualizando');
+  }
+  const geography = canonicalRouteGeography(input);
+  const unchanged = route.region === geography.region && route.city === geography.city;
+  if (!unchanged) {
+    DB.run('UPDATE proxy_routes SET region=?,city=?,updated_at=? WHERE route_id=?',
+      [geography.region, geography.city, now(), normalizedRouteId]);
+  }
+  labControl.audit('proxy_route.geography.update', unchanged ? 'unchanged' : 'ok', geography, {
+    actor: input.actor,
+    route_id: normalizedRouteId,
+    idempotency_key: idempotencyKey,
+  });
+  return {
+    route: inspect(normalizedRouteId),
+    timezone: geography.timezone,
+    locale: geography.locale,
+    unchanged,
+    idempotent_replay: false,
   };
 }
 
@@ -225,6 +354,7 @@ function updateDeviceProxyState(deviceId, state) {
 
 async function assign(routeId, input = {}) {
   requireDb();
+  if (SWAP_ACTIVE) throw new Error('Intercambio de rutas en curso');
   rejectSecrets(input);
   if (input.confirm !== true) throw new Error('confirm=true requerido');
   if (!Object.prototype.hasOwnProperty.call(input, 'expected_previous_route_id')) {
@@ -298,6 +428,7 @@ async function assign(routeId, input = {}) {
 
 async function release(routeId, input = {}) {
   requireDb();
+  if (SWAP_ACTIVE) throw new Error('Intercambio de rutas en curso');
   if (input.confirm !== true) throw new Error('confirm=true requerido');
   const deviceId = Number(input.device_id);
   labControl.assertDeviceAllowed(deviceId);
@@ -397,6 +528,7 @@ function selectRotationTarget(deviceId, currentRouteId, input = {}) {
 
 async function rotate(input = {}) {
   requireDb();
+  if (SWAP_ACTIVE) throw new Error('Intercambio de rutas en curso');
   rejectSecrets(input);
   if (input.confirm !== true) throw new Error('confirm=true requerido');
   const deviceId = Number(input.device_id);
@@ -478,6 +610,7 @@ async function rotate(input = {}) {
 
 async function requestProviderRotation(routeId, input = {}) {
   requireDb();
+  if (SWAP_ACTIVE) throw new Error('Intercambio de rutas en curso');
   rejectSecrets(input);
   if (input.confirm !== true) throw new Error('confirm=true requerido');
   const normalizedRouteId = String(routeId || '').trim().toLowerCase();
@@ -531,8 +664,180 @@ function extractIp(result) {
   return data && (data.external_ip || data.public_ip || data.ip) ? String(data.external_ip || data.public_ip || data.ip).trim() : null;
 }
 
+// Reassign only already-active dedicated routes. The phones are changed first, then
+// their one-to-one registry rows are committed together; no phone is set to direct.
+async function swapAssignedRoutes(input = {}) {
+  requireDb();
+  rejectSecrets(input);
+  if (input.confirm !== true) throw new Error('confirm=true requerido');
+  if (SWAP_ACTIVE) throw new Error('Intercambio de rutas en curso');
+  const ids = input.device_ids;
+  const expectedIds = input.expected_route_ids;
+  if (!Array.isArray(ids) || ![2, 3].includes(ids.length) ||
+      !ids.every(id => Number.isInteger(id) && id > 0) || new Set(ids).size !== ids.length) {
+    throw new Error('device_ids debe contener 2 o 3 dispositivos distintos');
+  }
+  if (!Array.isArray(expectedIds) || expectedIds.length !== ids.length ||
+      !expectedIds.every(id => typeof id === 'string' && ROUTE_ID_RE.test(id)) ||
+      new Set(expectedIds).size !== expectedIds.length) {
+    throw new Error('expected_route_ids debe contener las rutas actuales, en el mismo orden');
+  }
+  const key = String(input.idempotency_key || '').trim();
+  if (!key) throw new Error('idempotency_key requerido');
+  labControl.assertOperational();
+  for (const id of ids) labControl.assertDeviceAllowed(id);
+  const prior = DB.get('SELECT * FROM audit_events WHERE idempotency_key=?', [key]);
+  if (prior) {
+    if (prior.operation !== 'proxy_route.swap' || prior.result !== 'ok') throw new Error('idempotency_key ya usado');
+    const details = JSON.parse(prior.details || '{}');
+    if (JSON.stringify(details.device_ids) !== JSON.stringify(ids) ||
+        JSON.stringify(details.previous_route_ids) !== JSON.stringify(expectedIds)) {
+      throw new Error('idempotency_key corresponde a otro intercambio');
+    }
+    return { swapped: true, idempotent_replay: true, assignments: ids.map(id => activeAssignmentForDevice(id)) };
+  }
+
+  SWAP_ACTIVE = true;
+  const entries = [];
+  let changed = false;
+  try {
+    for (let i = 0; i < ids.length; i++) {
+      const device = DB.get('SELECT * FROM devices WHERE id=?', [ids[i]]);
+      const assignment = activeAssignmentForDevice(ids[i]);
+      const route = assignment && DB.get('SELECT * FROM proxy_routes WHERE route_id=?', [assignment.route_id]);
+      if (!device || device.status !== 'online' || device.current_task_id) throw new Error(`Dispositivo ${ids[i]} no está libre y online`);
+      const activeTask = DB.get("SELECT COUNT(*) AS n FROM task_assignments WHERE device_id=? AND status IN ('assigned','running','scheduled')", [ids[i]]);
+      if (activeTask && activeTask.n) throw new Error(`Dispositivo ${ids[i]} tiene una tarea activa`);
+      if (!assignment || assignment.route_id !== expectedIds[i] || !route ||
+          Number(route.assigned_device_id) !== ids[i]) throw new Error(`La asignación de ${ids[i]} cambió`);
+      if (route.classification !== 'dedicated_static' || route.health_state !== 'verified' ||
+          !route.expected_public_ip || route.observed_public_ip !== route.expected_public_ip ||
+          route.protocol !== 'HTTP') throw new Error(`Ruta ${route.route_id} no está verificada para Android global`);
+      const state = await getActualProxyState(device);
+      if (!state.proxy_enabled || state.observed_proxy !== `${route.internal_host}:${route.internal_port}`) {
+        throw new Error(`Proxy real de ${ids[i]} no coincide con su asignación`);
+      }
+      entries.push({ device, assignment, route, state });
+    }
+    const geography = entries.map(({ route }) =>
+      [route.country, route.region, route.city, route.assigned_fleet_vlan, resolveRouteTimezone(route)]
+        .map(value => String(value).toLowerCase()).join('|'));
+    if (new Set(geography).size !== 1) throw new Error('Las rutas no comparten ciudad, región, VLAN y zona horaria');
+    if (new Set(entries.map(entry => entry.route.expected_public_ip)).size !== entries.length) {
+      throw new Error('Las rutas no tienen IPs públicas distintas');
+    }
+    if (!PROBE_DEVICE_ROUTE || !VERIFY_DEVICE_EGRESS) throw new Error('Sondas de ruta y egreso requeridas');
+    const targets = entries.map((_, i) => entries[(i + entries.length - 1) % entries.length].route);
+    for (let i = 0; i < entries.length; i++) {
+      const probe = await PROBE_DEVICE_ROUTE(entries[i].device, targets[i], 10000);
+      if (!probe || !probe.success || extractIp(probe) !== targets[i].expected_public_ip) {
+        throw new Error(`Sonda de ${ids[i]} a ${targets[i].route_id} no coincide con su IP esperada`);
+      }
+    }
+    // Dispatch together so no account spends a long time sharing a route with another.
+    changed = true;
+    const applied = await Promise.allSettled(entries.map((entry, i) => applyRouteToDevice(entry.device, targets[i])));
+    const failed = applied.find(result => result.status === 'rejected');
+    if (failed) throw failed.reason;
+    for (let i = 0; i < entries.length; i++) {
+      const actual = await getActualProxyState(entries[i].device);
+      const observed = await VERIFY_DEVICE_EGRESS(entries[i].device);
+      if (actual.observed_proxy !== `${targets[i].internal_host}:${targets[i].internal_port}` ||
+          !observed || !observed.success || extractIp(observed) !== targets[i].expected_public_ip) {
+        throw new Error(`Egreso de ${ids[i]} no coincide con ${targets[i].route_id}`);
+      }
+    }
+
+    // sql.js export() ends an open transaction. Drain any pending snapshot first;
+    // the DB wrapper also suppresses snapshots until COMMIT/ROLLBACK completes.
+    if (typeof DB.flush === 'function') DB.flush();
+    DB.exec('BEGIN IMMEDIATE');
+    let transactionOpen = true;
+    try {
+      const timestamp = now();
+      for (const entry of entries) {
+        DB.run("UPDATE proxy_route_assignments SET active=0,state='superseded',released_at=?,updated_at=? WHERE id=?",
+          [timestamp, timestamp, entry.assignment.id]);
+      }
+      for (let i = 0; i < entries.length; i++) {
+        DB.run('UPDATE proxy_routes SET assigned_device_id=?,last_verification_time=?,updated_at=? WHERE route_id=?',
+          [ids[i], timestamp, timestamp, targets[i].route_id]);
+        DB.run('INSERT INTO proxy_route_assignments(route_id,device_id,previous_route_id,previous_proxy_state,state,active,idempotency_key,assigned_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+          [targets[i].route_id, ids[i], entries[i].route.route_id, JSON.stringify(entries[i].state),
+            'active', 1, `${key}:${i}`, timestamp, timestamp, timestamp]);
+        updateDeviceProxyState(ids[i], { proxy_enabled: true, proxy_host: targets[i].internal_host, proxy_port: targets[i].internal_port });
+      }
+      labControl.audit('proxy_route.swap', 'ok', {
+        device_ids: ids, previous_route_ids: expectedIds, target_route_ids: targets.map(route => route.route_id),
+        observed_public_ips: targets.map(route => route.expected_public_ip),
+      }, { actor: input.actor, idempotency_key: key });
+      DB.exec('COMMIT');
+      transactionOpen = false;
+    } catch (error) {
+      if (transactionOpen) {
+        try { DB.exec('ROLLBACK'); }
+        catch (_) { /* The DB may already have ended the transaction; inspect assignments below. */ }
+      }
+      throw error;
+    }
+    return { swapped: true, idempotent_replay: false,
+      assignments: ids.map(id => activeAssignmentForDevice(id)),
+      target_routes: targets.map(publicRoute) };
+  } catch (error) {
+    if (changed) {
+      const recorded = entries.map(entry => activeAssignmentForDevice(entry.device.id)?.route_id || null);
+      const originals = entries.map(entry => entry.route.route_id);
+      const targets = entries.map((_, i) => entries[(i + entries.length - 1) % entries.length].route);
+      const targetRecorded = recorded.every((routeId, i) => routeId === targets[i].route_id);
+      const originalRecorded = recorded.every((routeId, i) => routeId === originals[i]);
+      if (targetRecorded) {
+        // Never restore the phones after a commit that may already be durable.
+        const checked = await Promise.allSettled(entries.map(async (entry, i) => {
+          const actual = await getActualProxyState(entry.device);
+          const egress = await VERIFY_DEVICE_EGRESS(entry.device);
+          if (actual.observed_proxy !== `${targets[i].internal_host}:${targets[i].internal_port}` ||
+              !egress || !egress.success || extractIp(egress) !== targets[i].expected_public_ip) {
+            throw new Error(`Committed target differs on device ${entry.device.id}`);
+          }
+        }));
+        const coherent = checked.every(result => result.status === 'fulfilled');
+        labControl.emergencyStop({ confirm: true,
+          reason: `Route swap DB committed but response failed; target phones ${coherent ? 'verified' : 'MISMATCH'} for devices ${ids.join(',')}: ${error.message}`,
+          actor: input.actor, idempotency_key: `${key}:halt` });
+        throw new Error(`${error.message}; DB committed; target phones ${coherent ? 'verified' : 'mismatched'}; lab halted`);
+      }
+      if (!originalRecorded) {
+        labControl.emergencyStop({ confirm: true,
+          reason: `Route swap DB partially changed for devices ${ids.join(',')}; manual recovery required: ${error.message}`,
+          actor: input.actor, idempotency_key: `${key}:halt` });
+        throw new Error(`${error.message}; DB partially changed; phones left on target; lab halted`);
+      }
+      const restored = await Promise.allSettled(entries.map(entry => restoreDeviceProxy(entry.device, entry.state)));
+      let rollbackFailed = restored.some(result => result.status === 'rejected');
+      if (!rollbackFailed) {
+        const checked = await Promise.allSettled(entries.map(async entry => {
+          const actual = await getActualProxyState(entry.device);
+          const egress = await VERIFY_DEVICE_EGRESS(entry.device);
+          if (actual.observed_proxy !== entry.state.observed_proxy ||
+              !egress || !egress.success || extractIp(egress) !== entry.route.expected_public_ip) {
+            throw new Error(`Rollback verification failed for device ${entry.device.id}`);
+          }
+        }));
+        rollbackFailed = checked.some(result => result.status === 'rejected');
+      }
+      labControl.emergencyStop({ confirm: true, reason: `Route swap failed; rollback ${rollbackFailed ? 'FAILED' : 'verified'} for devices ${ids.join(',')}: ${error.message}`,
+        actor: input.actor, idempotency_key: `${key}:halt` });
+      throw new Error(`${error.message}; rollback=${rollbackFailed ? 'failed, manual recovery required' : 'restored; lab halted'}`);
+    }
+    throw error;
+  } finally {
+    SWAP_ACTIVE = false;
+  }
+}
+
 async function verifyDeviceEgress(routeId, input = {}) {
   requireDb();
+  if (SWAP_ACTIVE) throw new Error('Intercambio de rutas en curso');
   if (input.confirm !== true) throw new Error('confirm=true requerido');
   const deviceId = Number(input.device_id);
   labControl.assertDeviceAllowed(deviceId);
@@ -572,4 +877,24 @@ async function verifyDeviceEgress(routeId, input = {}) {
   return { matches, expected_public_ip: route.expected_public_ip, observed_public_ip: observed, rollback, route: inspect(routeId) };
 }
 
-module.exports = { init, list, inspect, enroll, testRoute, assign, release, rotate, requestProviderRotation, verifyDeviceEgress, rejectSecrets, publicRoute, parseProxyState, selectRotationTarget };
+module.exports = {
+  init,
+  list,
+  inspect,
+  enroll,
+  testRoute,
+  assign,
+  release,
+  rotate,
+  swapAssignedRoutes,
+  requestProviderRotation,
+  verifyDeviceEgress,
+  rejectSecrets,
+  publicRoute,
+  parseProxyState,
+  selectRotationTarget,
+  resolveRouteTimezone,
+  resolveRouteLocale,
+  resolveDeviceRouteContext,
+  updateGeography,
+};

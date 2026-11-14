@@ -7,8 +7,17 @@ import {
 import axios from "axios";
 import { readFileSync } from "node:fs";
 import { ANTI_IDLE_TOOLS } from "./anti-idle-tools.js";
+import { YOUTUBE_MUSIC_TOOLS } from "./youtube-music-tools.js";
 
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000/api/v1";
+// Optional one-device profile for a local AI pilot. It hides all fleet-wide,
+// credential, account, proxy and Hermes tools even if the client guesses a name.
+const LOCAL_AGENT_TEST = /^(1|true|yes)$/i.test(process.env.MCP_LOCAL_AGENT_TEST || "");
+const LOCAL_AGENT_DEVICE_ID = Number(process.env.MCP_LOCAL_AGENT_DEVICE_ID || 0);
+const LOCAL_AGENT_COMMANDS = new Set([
+    "AGENT_PING", "GET_FOREGROUND_APP", "MEDIA_RESUME_IF_PAUSED",
+    "PRESS_HOME", "PRESS_BACK", "SCROLL", "OPEN_APP",
+]);
 const BACKEND_TOKEN = (() => {
     if (process.env.BACKEND_TOKEN) return process.env.BACKEND_TOKEN.trim();
     if (!process.env.BACKEND_TOKEN_FILE) return "";
@@ -133,7 +142,9 @@ const TOOLS = [
                         "START_ACTIVITY", "FORCE_STOP", "GRANT_PERMISSION", "SETTINGS_GET", "SCREEN_ON", "SCREEN_OFF",
                         "UNLOCK", "KEEP_AWAKE", "SET_TIME_AUTO", "SET_TIMEZONE", "GET_TIME", "DEVICE_STABILIZE",
                         "READ_SCREEN_TEXT", "SCREEN_RECORD", "PULL_FILE", "CLEAR_APP", "UNINSTALL_APP", "INSTALL_APK",
-                        "SETTINGS_PUT", "REBOOT", "MONKEY", "PUSH_FILE"
+                        "SETTINGS_PUT", "REBOOT", "MONKEY", "PUSH_FILE",
+                        "AGENT_PING", "AGENT_ACCESSIBILITY_ON", "AGENT_ACCESSIBILITY_OFF", "GET_FOREGROUND_APP",
+                        "MEDIA_RESUME_IF_PAUSED"
                     ]
                 },
                 params: { type: "object", additionalProperties: true },
@@ -191,6 +202,7 @@ const TOOLS = [
     },
 
     ...ANTI_IDLE_TOOLS,
+    ...YOUTUBE_MUSIC_TOOLS,
 
     // Credential-free stable proxy routes
     {
@@ -862,6 +874,23 @@ async function apiDelete(endpoint: string) {
 // ============================================================
 
 async function callTool(name: string, params: any) {
+    if (LOCAL_AGENT_TEST) {
+        if (name === "lab_status") return apiGet("/lab/status");
+        if (name !== "device_command" || Number(params?.device_id) !== LOCAL_AGENT_DEVICE_ID
+            || !LOCAL_AGENT_COMMANDS.has(String(params?.command || ""))) {
+            throw new Error("Local-agent pilot is restricted to one named device and allowlisted commands");
+        }
+        if (params?.command === "OPEN_APP") {
+            const pkg = String(params?.params?.package_name || params?.params?.packageName || params?.params?.package || "");
+            if (!["com.spotify.music", "com.google.android.apps.youtube.music"].includes(pkg)) {
+                throw new Error("OPEN_APP requires params.package_name for Spotify or YT Music");
+            }
+            params = { ...params, params: { ...params.params, package_name: pkg } };
+        }
+        if (params?.command === "SCROLL" && !["up", "down"].includes(String(params?.params?.direction || ""))) {
+            throw new Error("Local-agent pilot requires an explicit scroll direction");
+        }
+    }
     switch (name) {
         case "devices_list":
             return apiGet("/devices", {
@@ -925,6 +954,30 @@ async function callTool(name: string, params: any) {
             return apiPost("/anti-idle/stop", params);
         case "run_anti_idle_now":
             return apiPost("/anti-idle/run-now", params);
+        case "youtube_music_create_playlist":
+            if (params.confirm !== true) throw new Error("confirm=true required");
+            return apiPost("/devices/batch-command", {
+                device_ids: params.device_ids,
+                command: "YTMUSIC_CREATE_PLAYLIST",
+                params: {
+                    playlist_name: params.playlist_name,
+                    privacy: params.privacy || "private",
+                    tracks: params.tracks,
+                    close_app_after: params.close_app_after === true,
+                    confirm: true,
+                    idempotency_key: params.idempotency_key,
+                },
+            });
+        case "youtube_music_guard_status":
+            return apiGet("/youtube-music/guard");
+        case "configure_youtube_music_guard":
+            return apiPut("/youtube-music/guard/config", params);
+        case "start_youtube_music_guard":
+            return apiPost("/youtube-music/guard/start", params);
+        case "stop_youtube_music_guard":
+            return apiPost("/youtube-music/guard/stop", params);
+        case "check_youtube_music_guard_now":
+            return apiPost("/youtube-music/guard/check-now", params);
         case "list_proxy_routes":
             return apiGet("/proxy-routes", params);
         case "inspect_proxy_route":
@@ -1088,13 +1141,48 @@ async function callTool(name: string, params: any) {
 // ============================================================
 
 async function main() {
+    if (LOCAL_AGENT_TEST && (!Number.isInteger(LOCAL_AGENT_DEVICE_ID) || LOCAL_AGENT_DEVICE_ID <= 0)) {
+        throw new Error("MCP_LOCAL_AGENT_DEVICE_ID must name one positive device ID");
+    }
+    if (LOCAL_AGENT_TEST) {
+        const backend = new URL(BACKEND_URL);
+        if (backend.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(backend.hostname)
+            || backend.port !== "8733" || backend.pathname !== "/api/v1") {
+            throw new Error("Local-agent pilot requires the loopback desktop backend on port 8733");
+        }
+    }
     const server = new Server(
         { name: "mcp-appcontrol", version: "1.1.0" },
         { capabilities: { tools: {} } }
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-        tools: TOOLS,
+        tools: LOCAL_AGENT_TEST ? TOOLS.filter(tool => ["lab_status", "device_command"].includes(tool.name)).map(tool => {
+            if (tool.name !== "device_command") return tool;
+            return {
+                ...tool,
+                description: `Local XSAlpha pilot on device ${LOCAL_AGENT_DEVICE_ID} only. OPEN_APP requires params.package_name (com.spotify.music or com.google.android.apps.youtube.music); SCROLL requires params.direction (up or down). No accounts, proxy, credentials, or Hermes.`,
+                inputSchema: {
+                    ...tool.inputSchema,
+                    properties: {
+                        ...tool.inputSchema.properties,
+                        device_id: { type: "number", const: LOCAL_AGENT_DEVICE_ID },
+                        command: { type: "string", enum: [...LOCAL_AGENT_COMMANDS] },
+                        params: {
+                            type: "object",
+                            properties: {
+                                package_name: { type: "string", enum: ["com.spotify.music", "com.google.android.apps.youtube.music"] },
+                                packageName: { type: "string", enum: ["com.spotify.music", "com.google.android.apps.youtube.music"] },
+                                package: { type: "string", enum: ["com.spotify.music", "com.google.android.apps.youtube.music"] },
+                                direction: { type: "string", enum: ["up", "down"] },
+                                target_package: { type: "string", enum: ["com.spotify.music", "com.google.android.apps.youtube.music"] },
+                            },
+                            additionalProperties: false,
+                        },
+                    },
+                },
+            };
+        }) : TOOLS,
     }));
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {

@@ -686,6 +686,14 @@ function showStabilizationSummary(batch = {}) {
         .map(row => Number(row.data?.clock_drift_seconds))
         .filter(value => Number.isFinite(value));
     const timezones = [...new Set(successful.map(row => row.data?.state?.timezone).filter(Boolean))];
+    const locales = [...new Set(successful.map(row => row.data?.state?.locale).filter(Boolean))];
+    const locationCounts = new Map();
+    successful.forEach(row => {
+        const resolution = row.data?.timezone_resolution;
+        if (!resolution?.city || !resolution?.timezone) return;
+        const key = `${resolution.city}, ${resolution.region || ''} → ${resolution.timezone}`;
+        locationCounts.set(key, (locationCounts.get(key) || 0) + 1);
+    });
     const sampleDate = successful.find(row => row.data?.state?.date)?.data?.state?.date;
     const lines = [
         '🕐 Sincronización de hora terminada',
@@ -693,6 +701,11 @@ function showStabilizationSummary(batch = {}) {
     ];
     if (sampleDate) lines.push(`Hora leída: ${sampleDate}`);
     if (timezones.length) lines.push(`Zona horaria: ${timezones.join(', ')}`);
+    if (locales.length) lines.push(`Idioma: ${locales.join(', ')}`);
+    if (locationCounts.size) {
+        lines.push('Asignación por ruta:');
+        locationCounts.forEach((count, location) => lines.push(`• ${location}: ${count} dispositivo(s)`));
+    }
     if (drifts.length) lines.push(`Deriva máxima: ${Math.max(...drifts)} segundo(s).`);
     lines.push('', 'La orden se aplica en segundo plano y no cambia la pantalla.');
     lines.push('Las fechas antiguas dentro de notificaciones ya publicadas no se reescriben; desaparecen cuando la app vuelve a publicar la notificación.');
@@ -714,10 +727,16 @@ async function quickAction(command, params = {}) {
     const confirmationRequired = new Set([
         'CLEAR_APP', 'UNINSTALL_APP', 'INSTALL_APK', 'SETTINGS_PUT',
         'REBOOT', 'MONKEY', 'PUSH_FILE',
+        'INSTALL_AGENT_IF_MISSING', 'INSTALL_AGENT', 'TIKTOK_INSTALL_AGENT',
+        'AGENT_ACCESSIBILITY_ON', 'AGENT_ACCESSIBILITY_OFF',
+        'YTMUSIC_CREATE_PLAYLIST', 'YTMUSIC_CREATE_PLAYLIST_FROM_TRACKS',
     ]);
     if (confirmationRequired.has(command) && params.confirm !== true) {
         const target = ids.length === 1 ? 'el dispositivo seleccionado' : `${ids.length} dispositivos`;
-        if (!confirm(`${command} puede modificar datos o reiniciar ${target}. ¿Continuar?`)) return;
+        const description = command.startsWith('AGENT_ACCESSIBILITY_')
+            ? `${command.endsWith('_ON') ? 'Habilitar' : 'Deshabilitar'} Accesibilidad de XSAlpha en ${target}. Los demás servicios no se modificarán. ¿Continuar?`
+            : `${command} puede modificar datos o reiniciar ${target}. ¿Continuar?`;
+        if (!confirm(description)) return;
         params = { ...params, confirm: true };
     }
 
@@ -737,6 +756,16 @@ async function quickAction(command, params = {}) {
         });
         const d = r.data || {};
         addLog(`✓ "${command}": ${d.ok}/${d.total} ok`, d.failed ? 'warning' : 'info');
+        if (command === 'MEDIA_RESUME_IF_PAUSED' && Array.isArray(d.results)) {
+            const resumed = d.results.filter(row => row.success && row.data?.handled === true).length;
+            const unchanged = d.results.filter(row => row.success && row.data?.handled !== true).length;
+            addLog(`Reanudados: ${resumed}; sin cambio: ${unchanged}; fallos: ${d.failed || 0}.`, d.failed ? 'warning' : 'info');
+        }
+        if (command.startsWith('AGENT_ACCESSIBILITY_') && Array.isArray(d.results)) {
+            const ready = d.results.filter(row => row.success && row.data?.ready === true).length;
+            const waiting = d.results.filter(row => row.success && row.data?.ready !== true).length;
+            addLog(`XSAlpha listo: ${ready}; ajuste aplicado pero agente no listo: ${waiting}.`, waiting || d.failed ? 'warning' : 'info');
+        }
         if (d.failed && Array.isArray(d.results)) {
             d.results.filter(row => !row.success).forEach(row => {
                 const device = devices.find(item => Number(item.id) === Number(row.device_id));
@@ -781,24 +810,25 @@ async function checkAgentReadiness() {
     try {
         const response = await apiFetch('/devices/batch-command', {
             method: 'POST',
-            body: JSON.stringify({ device_ids: ids, command: 'AGENT_STATUS', params: {} }),
+            body: JSON.stringify({ device_ids: ids, command: 'AGENT_PING', params: {} }),
         });
         const rows = response.data?.results || [];
         const html = rows.map(row => {
             const state = row.data || {};
             const device = devices.find(item => Number(item.id) === Number(row.device_id));
             const yesNo = value => value ? '<span style="color:#22c55e">Sí</span>' : '<span style="color:#ef4444">No</span>';
-            const conflict = state.ui_automation_activa
-                ? '<span style="color:#f59e0b">Sí · TikMatrix ocupa UiAutomation</span>'
+            const conflict = state.external_ui_automation
+                ? '<span style="color:#f59e0b">Sí · sesión UiAutomation externa activa</span>'
                 : '<span style="color:#22c55e">No</span>';
             return `<section style="padding:10px 0;border-bottom:1px solid #334155">
               <strong>${escapeHtml(device?.name || row.device || `Dispositivo ${row.device_id}`)}</strong>
-              <div class="mail-row"><span class="mail-dev">Instalado</span><code>${yesNo(!!state.instalado)}</code></div>
+              <div class="mail-row"><span class="mail-dev">Instalado</span><code>${yesNo(!!state.installed)}</code></div>
               <div class="mail-row"><span class="mail-dev">Versión</span><code>${escapeHtml(state.version || '—')}</code></div>
-              <div class="mail-row"><span class="mail-dev">Accesibilidad habilitada</span><code>${yesNo(!!state.accesibilidad)}</code></div>
-              <div class="mail-row"><span class="mail-dev">Servicio vinculado</span><code>${yesNo(!!state.accesibilidad_vinculada)}</code></div>
+              <div class="mail-row"><span class="mail-dev">Accesibilidad habilitada</span><code>${yesNo(!!state.accessibility_enabled)}</code></div>
+              <div class="mail-row"><span class="mail-dev">Servicio vinculado</span><code>${yesNo(!!state.accessibility_bound)}</code></div>
               <div class="mail-row"><span class="mail-dev">Conflicto UiAutomation</span><code>${conflict}</code></div>
-              <div class="mail-row"><span class="mail-dev">Listo para MCP</span><code>${yesNo(!!state.listo)}</code></div>
+              <div class="mail-row"><span class="mail-dev">Endpoint /ping responde</span><code>${yesNo(!!state.endpoint_reachable)}</code></div>
+              <div class="mail-row"><span class="mail-dev">Listo para MCP</span><code>${yesNo(!!state.ready)}</code></div>
               <div class="muted-text">${escapeHtml(row.message || '')}</div>
             </section>`;
         }).join('');
@@ -1093,7 +1123,7 @@ function openEmailDistributionModal() {
         </label>
 
         <label>Correos (uno por línea)
-          <textarea id="mailList" rows="8" class="mail-textarea" placeholder="uno@gmail.com&#10;dos@gmail.com:suClave&#10;tres@gmail.com,suClave"></textarea>
+          <textarea id="mailList" rows="8" class="mail-textarea" placeholder="uno@example.com&#10;dos@example.com:suClave&#10;tres@example.com,suClave"></textarea>
         </label>
         <p class="proxy-note">Formatos: <code>correo</code>, <code>correo:clave</code> o <code>correo,clave</code>. La clave es opcional y se guarda cifrada.</p>
 
@@ -1459,7 +1489,7 @@ function openAccountAddModal() {
         </label>
 
         <label>Correo a escribir
-          <input id="addEmail" type="email" placeholder="usuario@gmail.com">
+          <input id="addEmail" type="email" placeholder="usuario@example.com">
         </label>
 
         <p class="proxy-note">El correo se escribe automáticamente. Se presiona Enter para avanzar al campo de contraseña.</p>

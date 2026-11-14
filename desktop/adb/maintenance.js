@@ -2,6 +2,7 @@
 
 const ANIMATION_SCALES = new Set([0, 0.5, 1]);
 const TIMEZONE_PATTERN = /^[A-Za-z_]+(?:\/[A-Za-z0-9_+\-.]+)+$/;
+const LOCALE_PATTERN = /^[a-z]{2,3}-[A-Z]{2}$/;
 const PROXY_DISABLED_VALUES = new Set(['', ':0', 'null']);
 
 function toBoolean(value, fallback) {
@@ -36,6 +37,8 @@ function normalizeStabilizeParams(params = {}) {
   if (timezone && !TIMEZONE_PATTERN.test(timezone)) {
     throw new Error('Zona horaria inválida; usa un identificador como America/Chicago');
   }
+  const locale = String(params.locale || '').trim();
+  if (locale && !LOCALE_PATTERN.test(locale)) throw new Error('Idioma inválido; usa un código como en-US');
 
   const maxClockDriftSeconds = Number(params.max_clock_drift_seconds ?? 10);
   if (!Number.isInteger(maxClockDriftSeconds) || maxClockDriftSeconds < 1 || maxClockDriftSeconds > 60) {
@@ -50,6 +53,7 @@ function normalizeStabilizeParams(params = {}) {
     syncTime,
     clockSource,
     timezone,
+    locale,
     maxClockDriftSeconds,
   };
 }
@@ -80,9 +84,10 @@ async function readSetting(serial, shell, namespace, key) {
 }
 
 async function readDeviceState(serial, shell) {
-  const [proxy, timezone, date, epochSeconds, route, stayAwake, screenTimeout, windowScale, transitionScale, animatorScale] = await Promise.all([
+  const [proxy, timezone, locale, date, epochSeconds, route, stayAwake, screenTimeout, windowScale, transitionScale, animatorScale] = await Promise.all([
     readSetting(serial, shell, 'global', 'http_proxy'),
     shell(serial, ['getprop', 'persist.sys.timezone']).then(String).then(value => value.trim()).catch(() => null),
+    shell(serial, ['getprop', 'persist.sys.locale']).then(String).then(value => value.trim()).catch(() => null),
     shell(serial, ['date']).then(String).then(value => value.trim()).catch(() => null),
     shell(serial, ['date', '+%s']).then(String).then(value => Number(value.trim())).catch(() => null),
     shell(serial, ['ip', 'route']).then(String).then(value => value.trim()).catch(() => null),
@@ -97,6 +102,7 @@ async function readDeviceState(serial, shell) {
   return {
     proxy: PROXY_DISABLED_VALUES.has(proxy ?? '') ? null : proxy,
     timezone,
+    locale,
     date,
     epoch_seconds: Number.isFinite(epochSeconds) ? epochSeconds : null,
     route,
@@ -153,6 +159,7 @@ async function stabilizeDevice(serial, params, shell) {
     screen_timeout: state.screen_off_timeout_ms === options.screenTimeoutMs,
     animations: Object.values(state.animation_scale).every(value => value === options.animationScale),
     timezone: !options.timezone || state.timezone === options.timezone,
+    locale: !options.locale || state.locale === options.locale,
     clock: !options.syncTime || (clockDriftSeconds !== null && clockDriftSeconds <= options.maxClockDriftSeconds),
   };
   // Some Samsung/Android builds apply `cmd alarm set-time` (and occasionally

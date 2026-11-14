@@ -104,6 +104,13 @@ test('allowlist lab scope permits only exact configured fleet serials', async t 
     /confirm=true/i,
   );
   assert.equal(labControl.validateStep({ type: 'REBOOT', confirm: true }).length, 0);
+
+  for (const command of ['INSTALL_APK', 'INSTALL_AGENT_IF_MISSING', 'INSTALL_AGENT', 'TIKTOK_INSTALL_AGENT']) {
+    assert.match(labControl.validateStep({ type: command }).join(' '), /confirm=true/i);
+    assert.equal(labControl.validateStep({ type: command, confirm: true }).length, 0);
+  }
+  assert.equal(labControl.validateStep({ type: 'AGENT_STATUS' }).length, 0);
+  assert.equal(labControl.validateStep({ type: 'AGENT_PING' }).length, 0);
 });
 
 test('emergency stop is idempotent and requests cancellation without clearing proxy state', async t => {

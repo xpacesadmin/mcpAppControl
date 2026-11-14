@@ -327,7 +327,7 @@
     const pace = { ...preset, lock_portrait: draft.lock_portrait !== false };
     const repeatPause = pace.pace === 'careful' ? 1300 : 900;
     if (draft.kind === 'maintenance') return [
-      { type: 'DEVICE_STABILIZE', keep_awake: 'true', screen_timeout_minutes: 30, animation_scale: '1', sync_time: 'false' },
+      { type: 'DEVICE_STABILIZE', keep_awake: 'true', screen_timeout_minutes: 30, animation_scale: '1', sync_time: 'true', timezone_source: 'proxy_route' },
       { type: 'DEVICE_HEALTH' }, { type: 'DEVICE_NETWORK_STATUS' },
     ];
     const result = [];

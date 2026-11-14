@@ -13,6 +13,8 @@ const deviceAccounts = require('./device_accounts');
 const proxies = require('./proxies');
 const labControl = require('./lab_control');
 const antiIdle = require('./anti_idle');
+const youtubeMusicGuard = require('./youtube_music_guard');
+const youtubeMusicReviewQueue = require('./youtube_music_review_queue');
 const proxyRoutes = require('./proxy_routes');
 const proxyOrchControl = require('./proxy_orch_control');
 const hermes = require('./hermes');
@@ -80,6 +82,8 @@ function createServer(db, routerPort, apiToken = '') {
   });
   deviceAccounts.init(db, { dispatchDevice: (serial, command, params) => logic.routerDispatch(serial, command, params) });
   antiIdle.init(db, { dispatch: (serial, command, params) => logic.routerDispatch(serial, command, params) });
+  youtubeMusicGuard.init(db, { dispatch: (serial, command, params) => logic.routerDispatch(serial, command, params) });
+  youtubeMusicReviewQueue.init(db);
 
   const app = express();
   app.use(express.json({ limit: '50mb' }));
@@ -204,8 +208,69 @@ function createServer(db, routerPort, apiToken = '') {
     catch (error) { res.status(422).json({ success: false, message: error.message }); }
   });
 
+  app.get('/api/v1/youtube-music/guard', (_req, res) => {
+    res.json({ success: true, data: youtubeMusicGuard.state() });
+  });
+  app.put('/api/v1/youtube-music/guard/config', (req, res) => {
+    try { res.json({ success: true, data: youtubeMusicGuard.configure(req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.post('/api/v1/youtube-music/guard/start', (req, res) => {
+    try { res.json({ success: true, data: youtubeMusicGuard.start(req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.post('/api/v1/youtube-music/guard/stop', (req, res) => {
+    try { res.json({ success: true, data: youtubeMusicGuard.stop(req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.post('/api/v1/youtube-music/guard/check-now', (req, res) => {
+    try { res.json({ success: true, data: youtubeMusicGuard.runNow(req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+
+  // Manual-review queue only: these routes never dispatch an ADB/agent command.
+  app.get('/api/v1/youtube-music/review-queue', (req, res) => {
+    try {
+      res.json({
+        success: true,
+        data: {
+          config: youtubeMusicReviewQueue.state(),
+          candidates: youtubeMusicReviewQueue.list(req.query || {}),
+        },
+      });
+    } catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.put('/api/v1/youtube-music/review-queue/config', (req, res) => {
+    try { res.json({ success: true, data: youtubeMusicReviewQueue.configure(req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.post('/api/v1/youtube-music/review-queue/observe', (req, res) => {
+    try { res.status(201).json({ success: true, data: youtubeMusicReviewQueue.observe(req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.patch('/api/v1/youtube-music/review-queue/:id/draft', (req, res) => {
+    try { res.json({ success: true, data: youtubeMusicReviewQueue.editDraft(req.params.id, req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.post('/api/v1/youtube-music/review-queue/:id/approve', (req, res) => {
+    try { res.json({ success: true, data: youtubeMusicReviewQueue.approve(req.params.id, req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.post('/api/v1/youtube-music/review-queue/:id/dismiss', (req, res) => {
+    try { res.json({ success: true, data: youtubeMusicReviewQueue.dismiss(req.params.id, req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.get('/api/v1/youtube-music/review-queue-export', (req, res) => {
+    try { res.json({ success: true, data: youtubeMusicReviewQueue.exportApproved(req.query || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+
   app.get('/api/v1/proxy-routes', (req, res) => {
     res.json({ success: true, data: proxyRoutes.list(req.query || {}) });
+  });
+  app.post('/api/v1/proxy-routes/swap-assigned', async (req, res) => {
+    try { res.json({ success: true, data: await proxyRoutes.swapAssignedRoutes(req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
   });
   app.get('/api/v1/proxy-routes/:routeId', (req, res) => {
     const route = proxyRoutes.inspect(req.params.routeId);
@@ -214,6 +279,10 @@ function createServer(db, routerPort, apiToken = '') {
   });
   app.post('/api/v1/proxy-routes', (req, res) => {
     try { res.status(201).json({ success: true, data: proxyRoutes.enroll(req.body || {}) }); }
+    catch (error) { res.status(422).json({ success: false, message: error.message }); }
+  });
+  app.patch('/api/v1/proxy-routes/:routeId/location', (req, res) => {
+    try { res.json({ success: true, data: proxyRoutes.updateGeography(req.params.routeId, req.body || {}) }); }
     catch (error) { res.status(422).json({ success: false, message: error.message }); }
   });
   app.post('/api/v1/proxy-routes/:routeId/test', async (req, res) => {
@@ -549,7 +618,28 @@ function createServer(db, routerPort, apiToken = '') {
     if (typeof command !== 'string' || command.length > 80 || !/^[A-Z][A-Z0-9_]*$/.test(command)) {
       return res.status(422).json({ success: false, message: 'command tiene un formato inválido' });
     }
-    const step = { type: command, ...(params || {}) };
+    if (params != null && (typeof params !== 'object' || Array.isArray(params) || Object.hasOwn(params, 'type'))) {
+      return res.status(422).json({ success: false, message: 'params debe ser un objeto sin type; use command' });
+    }
+    if (labControl.CONFIRMATION_REQUIRED_STEPS.has(command) && params?.confirm !== true) {
+      return res.status(422).json({ success: false, message: `${command} requiere confirm=true` });
+    }
+    const playlistWrite = command === 'YTMUSIC_CREATE_PLAYLIST' || command === 'YTMUSIC_CREATE_PLAYLIST_FROM_TRACKS';
+    if (playlistWrite) {
+      if (params?.confirm !== true) return res.status(422).json({ success: false, message: 'confirm=true requerido' });
+      const idempotencyKey = String(params?.idempotency_key || '').trim();
+      if (!idempotencyKey) return res.status(422).json({ success: false, message: 'idempotency_key requerido' });
+      const prior = db.get('SELECT * FROM audit_events WHERE idempotency_key=?', [idempotencyKey]);
+      if (prior) {
+        return res.json({
+          success: true,
+          data: { idempotent_replay: true, total: 0, ok: 0, failed: 0, results: [] },
+          message: 'La solicitud de playlist ya fue procesada; no se volvió a ejecutar',
+        });
+      }
+    }
+    // The validated command must never be replaced by an untrusted params.type.
+    const step = { ...(params || {}), type: command };
     try {
       const control = labControl.state();
       if (control.lab_mode_enabled) {
@@ -578,6 +668,15 @@ function createServer(db, routerPort, apiToken = '') {
     }
     const ok = results.filter(x => x.success).length;
     const failed = results.length - ok;
+    if (playlistWrite) {
+      labControl.audit('youtube_music.playlist.create', failed ? 'partial' : 'ok', {
+        device_ids: device_ids.map(Number),
+        playlist_name: String(params.playlist_name || params.name || '').slice(0, 100),
+        requested_tracks: Array.isArray(params.tracks) ? params.tracks.length : 0,
+        ok,
+        failed,
+      }, { idempotency_key: params.idempotency_key, actor: 'local-operator' });
+    }
     res.json({
       success: failed === 0,
       data: { total: results.length, ok, failed, results },

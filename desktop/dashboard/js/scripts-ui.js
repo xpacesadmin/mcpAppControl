@@ -329,6 +329,17 @@ const TIKTOK_SCRIPTS = {
         campos: [],
     },
 
+    // ------------------------------------------------------------- YT MUSIC
+    YTMUSIC_CREATE_PLAYLIST: {
+        titulo: 'Crear playlist exacta · YT Music', app: 'ytmusic', peligro: true,
+        descripcion: 'Crea una playlist en el perfil activo usando pares exactos de artista y canción. Si una búsqueda falta o es ambigua, se detiene en vez de elegir el primer resultado.',
+        campos: [
+            { k: 'playlist_name', t: 'text', label: 'Nombre de la playlist', placeholder: 'Mi selección' },
+            { k: 'privacy', t: 'select', label: 'Privacidad', opciones: [['private', 'Privada'], ['unlisted', 'No listada'], ['public', 'Pública']], def: 'private' },
+            { k: 'tracks', t: 'track_pairs', label: 'Canciones (en orden)' },
+        ],
+    },
+
     // ----------------------------------------------------------------- TWITCH
     TWITCH_LOGIN: {
         titulo: 'Login', app: 'twitch',
@@ -464,6 +475,19 @@ function renderCampos(campos) {
         if (c.t === 'lista') {
             return `<label class="tm-campo"><span>${c.label}</span><textarea id="${id}" class="modal-input" rows="3" placeholder="${c.placeholder || ''}"></textarea></label>`;
         }
+        if (c.t === 'track_pairs') {
+            return `<div class="tm-campo tm-ancho"><span>${c.label}</span>
+              <div id="${id}" class="tm-track-list">
+                <div class="tm-track-row">
+                  <input class="modal-input tm-track-artist" placeholder="Artista exacto">
+                  <input class="modal-input tm-track-title" placeholder="Canción exacta">
+                  <input class="modal-input tm-track-url" placeholder="URL music.youtube.com (opcional)">
+                  <button type="button" class="btn-secondary" onclick="removeYtMusicTrackRow(this)" title="Quitar canción">×</button>
+                </div>
+              </div>
+              <button type="button" class="btn-secondary" style="margin-top:7px" onclick="addYtMusicTrackRow('${id}')">+ Agregar canción</button>
+            </div>`;
+        }
         const tipo = c.t === 'num' ? 'number' : 'text';
         const step = c.step ? ` step="${c.step}"` : '';
         return `<label class="tm-campo"><span>${c.label}</span><input type="${tipo}"${step} id="${id}" class="modal-input" value="${c.def ?? ''}" placeholder="${c.placeholder || ''}"></label>`;
@@ -526,7 +550,20 @@ function lanzarScript() {
             if (lista.length) params[c.k] = lista;
             continue;
         }
+        if (c.t === 'track_pairs') {
+            const tracks = [...el.querySelectorAll('.tm-track-row')].map(row => ({
+                artist: row.querySelector('.tm-track-artist')?.value.trim() || '',
+                title: row.querySelector('.tm-track-title')?.value.trim() || '',
+                url: row.querySelector('.tm-track-url')?.value.trim() || '',
+            })).filter(track => track.artist || track.title || track.url);
+            if (tracks.length) params[c.k] = tracks;
+            continue;
+        }
         if (v && v.trim()) params[c.k] = v.trim();
+    }
+
+    if (comando === 'YTMUSIC_CREATE_PLAYLIST' || comando === 'YTMUSIC_CREATE_PLAYLIST_FROM_TRACKS') {
+        params.idempotency_key = ytmId('ytm-playlist');
     }
 
     cerrarScript();
@@ -559,3 +596,295 @@ window.abrirScript = abrirScript;
 window.cerrarScript = cerrarScript;
 window.lanzarScript = lanzarScript;
 window.detenerTareas = detenerTareas;
+
+function addYtMusicTrackRow(containerId = 'tmf_tracks') {
+    const container = document.getElementById(containerId);
+    if (!container || container.querySelectorAll('.tm-track-row').length >= 50) return;
+    const row = document.createElement('div');
+    row.className = 'tm-track-row';
+    row.innerHTML = `<input class="modal-input tm-track-artist" placeholder="Artista exacto">
+      <input class="modal-input tm-track-title" placeholder="Canción exacta">
+      <input class="modal-input tm-track-url" placeholder="URL music.youtube.com (opcional)">
+      <button type="button" class="btn-secondary" onclick="removeYtMusicTrackRow(this)" title="Quitar canción">×</button>`;
+    container.appendChild(row);
+}
+
+function removeYtMusicTrackRow(button) {
+    const container = button?.closest('.tm-track-list');
+    const rows = container ? container.querySelectorAll('.tm-track-row') : [];
+    if (rows.length > 1) button.closest('.tm-track-row')?.remove();
+    else rows[0]?.querySelectorAll('input').forEach(input => { input.value = ''; });
+}
+
+function selectedYtMusicDeviceIds() {
+    const selected = [...selectedDeviceIds];
+    if (selected.length) return selected;
+    return devices.filter(device => ['online', 'busy'].includes(device.status)).map(device => device.id);
+}
+
+function ytmId(prefix) {
+    return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function refreshYtMusicGuard() {
+    const target = document.getElementById('ytMusicGuardStatus');
+    if (!target) return;
+    try {
+        const response = await apiFetch('/youtube-music/guard');
+        const state = response.data || {};
+        const status = state.running ? 'COMPROBANDO' : state.enabled ? 'ACTIVO' : 'APAGADO';
+        const handled = Number(state.last_result?.handled || 0);
+        target.textContent = `${status} · ${state.device_ids?.length || 0} dispositivo(s) · lote ${state.batch_size || 5} · última intervención del ciclo: ${handled}` +
+            (state.last_error ? ` · ${state.last_error}` : '');
+        if (!state.enabled) {
+            document.getElementById('ytMusicGuardPoll').value = state.poll_interval_seconds || 30;
+            document.getElementById('ytMusicGuardCooldown').value = state.cooldown_seconds || 90;
+            document.getElementById('ytMusicGuardBatch').value = state.batch_size || 5;
+        }
+    } catch (error) {
+        target.textContent = `No disponible: ${error.message}`;
+    }
+}
+
+async function configureYtMusicGuard() {
+    const ids = selectedYtMusicDeviceIds();
+    if (!ids.length) { alert('Seleccione al menos un dispositivo online.'); return; }
+    if (!confirm(`Guardar el monitor de YT Music para ${ids.length} dispositivo(s) seleccionados?`)) return;
+    try {
+        await apiFetch('/youtube-music/guard/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+                device_ids: ids,
+                poll_interval_seconds: Number(document.getElementById('ytMusicGuardPoll').value),
+                cooldown_seconds: Number(document.getElementById('ytMusicGuardCooldown').value),
+                batch_size: Number(document.getElementById('ytMusicGuardBatch').value),
+                confirm: true,
+                idempotency_key: ytmId('ytm-guard-config'),
+            }),
+        });
+        addLog(`Monitor YT Music configurado para ${ids.length} dispositivo(s)`, 'info');
+        await refreshYtMusicGuard();
+    } catch (error) { addLog(`YT Music monitor: ${error.message}`, 'error'); alert(error.message); }
+}
+
+async function startYtMusicGuard() {
+    if (!confirm('Activar el monitor de inactividad de YT Music con la configuración guardada?')) return;
+    try {
+        await apiFetch('/youtube-music/guard/start', {
+            method: 'POST',
+            body: JSON.stringify({ confirm: true, run_immediately: true, idempotency_key: ytmId('ytm-guard-start') }),
+        });
+        addLog('Monitor YT Music activado', 'info');
+        await refreshYtMusicGuard();
+    } catch (error) { addLog(`YT Music monitor: ${error.message}`, 'error'); alert(error.message); }
+}
+
+async function stopYtMusicGuard() {
+    try {
+        await apiFetch('/youtube-music/guard/stop', {
+            method: 'POST',
+            body: JSON.stringify({ confirm: true, reason: 'operator stop', idempotency_key: ytmId('ytm-guard-stop') }),
+        });
+        addLog('Monitor YT Music detenido', 'warning');
+        await refreshYtMusicGuard();
+    } catch (error) { addLog(`YT Music monitor: ${error.message}`, 'error'); alert(error.message); }
+}
+
+async function checkYtMusicGuardNow() {
+    try {
+        await apiFetch('/youtube-music/guard/check-now', {
+            method: 'POST',
+            body: JSON.stringify({ confirm: true, idempotency_key: ytmId('ytm-guard-check') }),
+        });
+        addLog('Comprobación YT Music solicitada', 'info');
+        setTimeout(refreshYtMusicGuard, 1200);
+    } catch (error) { addLog(`YT Music monitor: ${error.message}`, 'error'); alert(error.message); }
+}
+
+function escapeYtReview(value) {
+    return String(value ?? '').replace(/[&<>"']/g, char => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[char]));
+}
+
+let ytMusicReviewCandidatesById = new Map();
+function renderYtMusicReviewQueue(candidates = []) {
+    const target = document.getElementById('ytMusicReviewQueue');
+    if (!target) return;
+    ytMusicReviewCandidatesById = new Map(candidates.map(candidate => [Number(candidate.id), candidate]));
+    if (!candidates.length) {
+        target.innerHTML = '<div class="yt-review-card">No hay candidatos en la cola.</div>';
+        return;
+    }
+    target.innerHTML = candidates.map(candidate => {
+        const pending = candidate.status === 'pending_review';
+        const type = candidate.candidate_type === 'comment' ? 'Comentario' : 'Like';
+        const track = [candidate.track_artist, candidate.track_title].filter(Boolean).join(' · ');
+        const draft = candidate.comment_draft
+            ? `<div><strong>Borrador:</strong> ${escapeYtReview(candidate.comment_draft)}</div>`
+            : '';
+        const candidateId = Number(candidate.id);
+        const actions = pending ? `<div class="yt-review-card-actions">
+          ${candidate.candidate_type === 'comment' ? `<button class="btn-secondary" data-yt-review-action="edit" data-candidate-id="${candidateId}">✏️ Editar borrador</button>` : ''}
+          <button class="btn-secondary" data-yt-review-action="approve" data-candidate-id="${candidateId}">✅ Aprobar para acción manual</button>
+          <button class="btn-secondary" data-yt-review-action="dismiss" data-candidate-id="${candidateId}">🗑️ Descartar</button>
+        </div>` : '';
+        return `<div class="yt-review-card">
+          <div><strong>#${candidate.id} · ${type}</strong> · ${escapeYtReview(candidate.device_name || candidate.device_id)}</div>
+          <div>${escapeYtReview(track || 'Pista sin etiqueta')}</div>
+          ${draft}
+          <div style="color:#94a3b8">${escapeYtReview(candidate.status)} · ${escapeYtReview(candidate.generated_at)}</div>
+          ${actions}
+        </div>`;
+    }).join('');
+    target.querySelectorAll('[data-yt-review-action]').forEach(button => {
+        button.addEventListener('click', () => {
+            const candidateId = Number(button.dataset.candidateId);
+            if (!Number.isInteger(candidateId) || !ytMusicReviewCandidatesById.has(candidateId)) return;
+            const action = button.dataset.ytReviewAction;
+            if (action === 'edit') editYtMusicReviewDraft(candidateId);
+            if (action === 'approve') approveYtMusicReviewCandidate(candidateId);
+            if (action === 'dismiss') dismissYtMusicReviewCandidate(candidateId);
+        });
+    });
+}
+
+let ytMusicReviewConfigHydrated = false;
+async function refreshYtMusicReviewQueue() {
+    const status = document.getElementById('ytMusicReviewStatus');
+    if (!status) return;
+    try {
+        const response = await apiFetch('/youtube-music/review-queue?limit=100');
+        const config = response.data?.config || {};
+        const candidates = response.data?.candidates || [];
+        if (!ytMusicReviewConfigHydrated) {
+            document.getElementById('ytReviewLikeProbability').value = config.like_candidate_probability ?? 0.15;
+            document.getElementById('ytReviewCommentProbability').value = config.comment_candidate_probability ?? 0.05;
+            document.getElementById('ytReviewCooldown').value = config.cooldown_seconds ?? 1800;
+            document.getElementById('ytReviewDrafts').value = (config.comment_drafts || []).join('\n');
+            ytMusicReviewConfigHydrated = true;
+        }
+        const counts = config.counts || {};
+        status.textContent = `SOLO REVISIÓN MANUAL · pendientes ${counts.pending_review || 0} · aprobados ${counts.approved_manual || 0} · descartados ${counts.dismissed || 0} · 0 comandos enviados`;
+        renderYtMusicReviewQueue(candidates);
+    } catch (error) {
+        status.textContent = `Cola no disponible: ${error.message}`;
+    }
+}
+
+async function configureYtMusicReviewQueue() {
+    const ids = selectedYtMusicDeviceIds();
+    if (!ids.length) { alert('Seleccione al menos un dispositivo en línea.'); return; }
+    const drafts = document.getElementById('ytReviewDrafts').value
+        .split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+    if (!confirm(`Guardar la configuración de candidatos para ${ids.length} dispositivo(s)? Esto no enviará acciones a los teléfonos.`)) return;
+    try {
+        await apiFetch('/youtube-music/review-queue/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+                device_ids: ids,
+                like_candidate_probability: Number(document.getElementById('ytReviewLikeProbability').value),
+                comment_candidate_probability: Number(document.getElementById('ytReviewCommentProbability').value),
+                cooldown_seconds: Number(document.getElementById('ytReviewCooldown').value),
+                comment_drafts: drafts,
+                confirm: true,
+                idempotency_key: ytmId('ytm-review-config'),
+            }),
+        });
+        addLog('Cola segura de revisión YT Music configurada', 'info');
+        await refreshYtMusicReviewQueue();
+    } catch (error) { addLog(`Cola YT Music: ${error.message}`, 'error'); alert(error.message); }
+}
+
+async function generateYtMusicReviewCandidates() {
+    const ids = selectedYtMusicDeviceIds();
+    const artist = document.getElementById('ytReviewTrackArtist').value.trim();
+    const title = document.getElementById('ytReviewTrackTitle').value.trim();
+    if (!ids.length) { alert('Seleccione al menos un dispositivo en línea.'); return; }
+    if (!artist && !title) { alert('Indique el artista o la canción observada.'); return; }
+    if (!confirm(`Evaluar la pista para ${ids.length} dispositivo(s)? Solo se crearán candidatos de revisión; no habrá likes ni comentarios automáticos.`)) return;
+    try {
+        const seed = ytmId('ytm-observation');
+        const results = await Promise.all(ids.map(deviceId => apiFetch('/youtube-music/review-queue/observe', {
+            method: 'POST',
+            body: JSON.stringify({
+                device_id: deviceId,
+                track_artist: artist,
+                track_title: title,
+                observation_key: `${seed}-device-${deviceId}`,
+                source: 'dashboard-operator-observation',
+            }),
+        })));
+        const queued = results.reduce((count, result) => count + Number(result.data?.candidates?.length || 0), 0);
+        addLog(`YT Music: ${queued} candidato(s) añadidos; ninguna acción enviada`, 'info');
+        await refreshYtMusicReviewQueue();
+    } catch (error) { addLog(`Cola YT Music: ${error.message}`, 'error'); alert(error.message); }
+}
+
+async function editYtMusicReviewDraft(candidateId) {
+    const current = ytMusicReviewCandidatesById.get(Number(candidateId))?.comment_draft || '';
+    const draft = await customPrompt('Editar borrador', 'Este texto queda en la cola y no se publica automáticamente.', current, 'Máximo 280 caracteres');
+    if (draft == null) return;
+    try {
+        await apiFetch(`/youtube-music/review-queue/${candidateId}/draft`, {
+            method: 'PATCH',
+            body: JSON.stringify({ comment_draft: draft, confirm: true, idempotency_key: ytmId('ytm-review-edit') }),
+        });
+        await refreshYtMusicReviewQueue();
+    } catch (error) { alert(error.message); }
+}
+
+async function approveYtMusicReviewCandidate(candidateId) {
+    if (!confirm('Aprobar esta sugerencia para una acción MANUAL? No se enviará ningún comando al teléfono.')) return;
+    try {
+        await apiFetch(`/youtube-music/review-queue/${candidateId}/approve`, {
+            method: 'POST',
+            body: JSON.stringify({ confirm: true, actor: 'dashboard-operator', idempotency_key: ytmId('ytm-review-approve') }),
+        });
+        addLog(`Candidato #${candidateId} aprobado para revisión manual; 0 comandos enviados`, 'info');
+        await refreshYtMusicReviewQueue();
+    } catch (error) { alert(error.message); }
+}
+
+async function dismissYtMusicReviewCandidate(candidateId) {
+    if (!confirm('Descartar este candidato?')) return;
+    try {
+        await apiFetch(`/youtube-music/review-queue/${candidateId}/dismiss`, {
+            method: 'POST',
+            body: JSON.stringify({ confirm: true, actor: 'dashboard-operator', idempotency_key: ytmId('ytm-review-dismiss') }),
+        });
+        await refreshYtMusicReviewQueue();
+    } catch (error) { alert(error.message); }
+}
+
+async function exportYtMusicApproved() {
+    try {
+        const response = await apiFetch('/youtube-music/review-queue-export?limit=200');
+        const blob = new Blob([JSON.stringify(response.data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = `ytmusic-manual-review-${Date.now()}.json`;
+        anchor.click();
+        URL.revokeObjectURL(url);
+    } catch (error) { alert(error.message); }
+}
+
+window.addYtMusicTrackRow = addYtMusicTrackRow;
+window.removeYtMusicTrackRow = removeYtMusicTrackRow;
+window.refreshYtMusicGuard = refreshYtMusicGuard;
+window.configureYtMusicGuard = configureYtMusicGuard;
+window.startYtMusicGuard = startYtMusicGuard;
+window.stopYtMusicGuard = stopYtMusicGuard;
+window.checkYtMusicGuardNow = checkYtMusicGuardNow;
+window.refreshYtMusicReviewQueue = refreshYtMusicReviewQueue;
+window.configureYtMusicReviewQueue = configureYtMusicReviewQueue;
+window.generateYtMusicReviewCandidates = generateYtMusicReviewCandidates;
+window.editYtMusicReviewDraft = editYtMusicReviewDraft;
+window.approveYtMusicReviewCandidate = approveYtMusicReviewCandidate;
+window.dismissYtMusicReviewCandidate = dismissYtMusicReviewCandidate;
+window.exportYtMusicApproved = exportYtMusicApproved;
+setTimeout(refreshYtMusicGuard, 700);
+setTimeout(refreshYtMusicReviewQueue, 900);
+setInterval(refreshYtMusicGuard, 10000);
+setInterval(refreshYtMusicReviewQueue, 15000);

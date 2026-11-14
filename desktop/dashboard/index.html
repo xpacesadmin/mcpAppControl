@@ -59,6 +59,7 @@
                                 <button class="sub-tab" onclick="switchActionSubTab('scripts', this)">Rutinas</button>
                                 <button class="sub-tab" onclick="switchActionSubTab('tiktok', this)">TikTok</button>
                                 <button class="sub-tab" onclick="switchActionSubTab('spotify', this)">Spotify</button>
+                                <button class="sub-tab" onclick="switchActionSubTab('ytmusic', this)">YT Music</button>
                                 <button class="sub-tab" onclick="switchActionSubTab('twitch', this)">Twitch</button>
                                 <button class="sub-tab" onclick="switchActionSubTab('fleet', this)">Fleet Router</button>
                                 <button class="sub-tab" onclick="switchActionSubTab('antiidle', this)">Anti-idle</button>
@@ -70,8 +71,10 @@
                                 <!-- El agente vive en el teléfono y es lo que permite leer la pantalla:
                                      sin él los scripts no encuentran los controles. Va aquí, en General,
                                      porque es preparación del dispositivo y no algo de una app concreta. -->
-                                <button class="action-btn" style="font-weight: 700; background: #0f172a; color:#fff; border: 1px solid #334155; padding: 10px; font-size:13px;" onclick="quickAction('INSTALL_AGENT')" title="Instala únicamente XSAlpha Agent en los teléfonos seleccionados; no cambia el teclado ni instala lectores de terceros">🤖 Instalar XSAlpha Agent</button>
+                                <button class="action-btn" style="font-weight: 700; background: #0f172a; color:#fff; border: 1px solid #334155; padding: 10px; font-size:13px;" onclick="quickAction('INSTALL_AGENT_IF_MISSING')" title="Instala XSAlpha Agent únicamente cuando falta; no reinstala, no cambia el teclado ni instala lectores de terceros">🤖 Instalar XSAlpha Agent si falta</button>
                                 <button id="agentReadinessBtn" class="action-btn blue" style="font-weight:700; padding:10px; font-size:13px;" onclick="checkAgentReadiness()" title="Solo consulta instalación, versión y estado de accesibilidad; no instala ni cambia el teléfono">🩺 Comprobar XSAlpha</button>
+                                <button class="action-btn blue" onclick="quickAction('AGENT_ACCESSIBILITY_ON')" title="Habilita y verifica XSAlpha en los dispositivos seleccionados">🟢 XSAlpha ON</button>
+                                <button class="action-btn blue" onclick="quickAction('AGENT_ACCESSIBILITY_OFF')" title="Deshabilita solo XSAlpha y conserva otros servicios de Accesibilidad">⚫ XSAlpha OFF</button>
                                 <button class="action-btn purple" style="grid-column: 1 / -1; background: #4f46e5; font-size: 13px; font-weight: 700; padding: 10px;" onclick="promptPlayCustomTrackUrl()" title="Abre Spotify/YouTube y reproduce la canción del enlace que pegues, en los dispositivos seleccionados">🎧 Reproducir canción por enlace ▾</button>
                                 <button class="action-btn purple" onclick="promptOpenApp()" title="Abre una app por su nombre de paquete (ej. com.spotify.music)">🎵 Abrir app ▾</button>
                                 <button class="action-btn purple" onclick="promptCloseApp()" title="Fuerza el cierre de una app por su nombre de paquete">🚪 Cerrar app ▾</button>
@@ -96,10 +99,10 @@
                                 <button class="action-btn blue" onclick="quickAction('INPUT_KEYEVENT', { keycode: 187 })" title="Abre la vista de apps recientes">🗂️ Recientes</button>
                                 <button class="action-btn blue" onclick="quickAction('INPUT_KEYEVENT', { keycode: 24 })" title="Sube el volumen">🔊 Volumen +</button>
                                 <button class="action-btn blue" onclick="quickAction('INPUT_KEYEVENT', { keycode: 25 })" title="Baja el volumen">🔉 Volumen −</button>
-                                <button class="action-btn blue" data-stabilize-action="true" onclick="quickAction('DEVICE_STABILIZE', { keep_awake: true, screen_timeout_minutes: 30, animation_scale: 0 })" title="Despierta, mantiene encendido y reduce animaciones; verifica cada ajuste">🧰 Estabilizar</button>
+                                <button class="action-btn blue" data-stabilize-action="true" onclick="quickAction('DEVICE_STABILIZE', { keep_awake: true, screen_timeout_minutes: 30, animation_scale: 0, timezone_source: 'proxy_route' })" title="Estabiliza el dispositivo y aplica la zona horaria verificada de su ruta proxy asignada">🧰 Estabilizar</button>
                                 <button class="action-btn blue" onclick="quickAction('DEVICE_NETWORK_STATUS')" title="Lee proxy, IP local, ruta, fecha, zona horaria y ajustes de pantalla">📡 Diagnóstico red</button>
                                 <button class="action-btn blue" onclick="quickAction('CLEAR_PROXY')" title="Elimina todas las claves del proxy global y verifica conexión directa">🚫 Limpiar proxy</button>
-                                <button id="stabilizeTimeBtn" class="action-btn blue" data-stabilize-action="true" style="grid-column: 1 / -1;" onclick="quickAction('DEVICE_STABILIZE', { keep_awake: true, screen_timeout_minutes: 30, animation_scale: 0, sync_time: true, clock_source: 'host', max_clock_drift_seconds: 10 })" title="Sincroniza y verifica la hora y zona horaria desde este equipo; muestra el resultado medido y no modifica el proxy">🕐 Sincronizar y verificar hora/fecha</button>
+                                <button id="stabilizeTimeBtn" class="action-btn blue" data-stabilize-action="true" style="grid-column: 1 / -1;" onclick="quickAction('DEVICE_STABILIZE', { keep_awake: true, screen_timeout_minutes: 30, animation_scale: 0, sync_time: true, clock_source: 'host', timezone_source: 'proxy_route', max_clock_drift_seconds: 10 })" title="Sincroniza la hora y aplica la zona IANA de la ruta proxy verificada de cada dispositivo; no cambia el proxy">🕐 Sincronizar hora/zona por ruta</button>
                                 <button class="action-btn" style="grid-column: 1 / -1; background:#dc2626; color:#fff; font-weight:700;" onclick="quickAction('CHECK_BAN')" title="Lee la pantalla y detecta baneo, captcha o verificación">🛡️ Revisar baneo/captcha</button>
                                 <button class="action-btn blue" style="grid-column: 1 / -1;" onclick="quickAction('REBOOT')" title="Reinicia los dispositivos seleccionados">🔄 Reiniciar dispositivos</button>
                             </div>
@@ -186,9 +189,69 @@
 
                                 <div class="tm-sep">Comandos directos</div>
                                 <button class="action-btn blue" onclick="quickAction('OPEN_APP', { packageName: 'com.spotify.music', package_name: 'com.spotify.music' })" title="Abre Spotify en los dispositivos seleccionados">🎧 Abrir Spotify</button>
+                                <button class="action-btn blue" onclick="quickAction('MEDIA_RESUME_IF_PAUSED', { target_package: 'com.spotify.music' })" title="Reanuda la sesión de Spotify solo si está visible y pausada">▶️ Continuar Spotify</button>
                                 <button class="action-btn blue" onclick="quickAction('SPOTIFY_PLAYBACK', { action: 'pause' })" title="Pausa lo que esté sonando">⏸️ Pausar</button>
                                 <button class="action-btn blue" onclick="quickAction('SPOTIFY_PLAYBACK', { action: 'next' })" title="Salta a la siguiente pista">⏭️ Siguiente</button>
                                 <button class="action-btn blue" onclick="quickAction('FORCE_STOP', { package_name: 'com.spotify.music' })" title="Cierra Spotify por completo">🚪 Cerrar Spotify</button>
+                            </div>
+
+                            <!-- YOUTUBE MUSIC: playlist exacta + guardia de inactividad opt-in -->
+                            <div id="actionSubTab-ytmusic" class="action-buttons-grid" style="display:none;">
+                                <button class="action-btn blue" onclick="quickAction('MEDIA_RESUME_IF_PAUSED', { target_package: 'com.google.android.apps.youtube.music' })" title="Reanuda YT Music solo si está visible y pausada">▶️ Continuar YT Music</button>
+                                <div class="tm-pills">
+                                    <button class="tm-pill tm-ytmusic" onclick="abrirScript('YTMUSIC_CREATE_PLAYLIST')" title="Crea una playlist con pares exactos de artista y canción">➕ Playlist por artista/canción</button>
+                                    <button class="tm-pill tm-red" onclick="detenerTareas('com.google.android.apps.youtube.music')" title="Cancela una creación en curso y cierra YT Music">⏹️ Stop Task</button>
+                                </div>
+
+                                <div class="tm-sep">Video paused · Continue watching?</div>
+                                <div id="ytMusicGuardStatus" style="grid-column:1/-1; font-size:12px; color:#94a3b8; padding:4px 0;">Consultando…</div>
+                                <p class="sub-tab-hint" style="grid-column:1/-1;">
+                                    Comprueba la reproducción de YT Music visible; confirma el aviso exacto si aparece y reanuda una sesión pausada sin saltar canciones.
+                                </p>
+                                <label style="font-size:12px; font-weight:700;">Comprobar cada (segundos)
+                                    <input id="ytMusicGuardPoll" type="number" min="15" max="300" step="1" value="30" style="width:100%; margin-top:5px;">
+                                </label>
+                                <label style="font-size:12px; font-weight:700;">Enfriamiento tras actuar (segundos)
+                                    <input id="ytMusicGuardCooldown" type="number" min="30" max="1800" step="1" value="90" style="width:100%; margin-top:5px;">
+                                </label>
+                                <label style="font-size:12px; font-weight:700;">Dispositivos por comprobación
+                                    <input id="ytMusicGuardBatch" type="number" min="1" max="10" step="1" value="5" style="width:100%; margin-top:5px;">
+                                </label>
+                                <button class="action-btn blue" onclick="configureYtMusicGuard()">💾 Guardar selección/configuración</button>
+                                <button class="action-btn blue" onclick="startYtMusicGuard()">▶️ Activar monitor</button>
+                                <button class="action-btn blue" onclick="checkYtMusicGuardNow()">🔎 Comprobar ahora</button>
+                                <button class="action-btn" style="background:#b91c1c; color:#fff; font-weight:700;" onclick="stopYtMusicGuard()">⏹️ Detener monitor</button>
+                                <button class="action-btn blue" onclick="quickAction('OPEN_APP', { package_name: 'com.google.android.apps.youtube.music' })">🎵 Abrir YT Music</button>
+
+                                <div class="tm-sep">Candidatos de interacción · revisión manual</div>
+                                <p class="sub-tab-hint" style="grid-column:1/-1;">
+                                    Genera sugerencias probabilísticas, pero nunca pulsa Like ni escribe/publica comentarios.
+                                    Aprobar solo registra una decisión auditada para una acción manual.
+                                </p>
+                                <label style="font-size:12px; font-weight:700;">Probabilidad candidata Like (0–1)
+                                    <input id="ytReviewLikeProbability" type="number" min="0" max="1" step="0.05" value="0.15" style="width:100%; margin-top:5px;">
+                                </label>
+                                <label style="font-size:12px; font-weight:700;">Probabilidad candidata comentario (0–1)
+                                    <input id="ytReviewCommentProbability" type="number" min="0" max="1" step="0.05" value="0.05" style="width:100%; margin-top:5px;">
+                                </label>
+                                <label style="font-size:12px; font-weight:700;">Enfriamiento por tipo (segundos)
+                                    <input id="ytReviewCooldown" type="number" min="60" max="604800" step="60" value="1800" style="width:100%; margin-top:5px;">
+                                </label>
+                                <label style="grid-column:1/-1; font-size:12px; font-weight:700;">Borradores de comentario (uno por línea)
+                                    <textarea id="ytReviewDrafts" rows="3" class="modal-input" placeholder="Borradores para revisión; nunca se publican automáticamente"></textarea>
+                                </label>
+                                <button class="action-btn blue" onclick="configureYtMusicReviewQueue()">💾 Guardar configuración segura</button>
+                                <button class="action-btn blue" onclick="refreshYtMusicReviewQueue()">🔄 Actualizar cola</button>
+                                <label style="font-size:12px; font-weight:700;">Artista observado
+                                    <input id="ytReviewTrackArtist" class="modal-input" placeholder="Artista de la canción actual">
+                                </label>
+                                <label style="font-size:12px; font-weight:700;">Canción observada
+                                    <input id="ytReviewTrackTitle" class="modal-input" placeholder="Título de la canción actual">
+                                </label>
+                                <button class="action-btn blue" onclick="generateYtMusicReviewCandidates()">🎲 Evaluar selección</button>
+                                <button class="action-btn blue" onclick="exportYtMusicApproved()">⬇️ Exportar aprobados</button>
+                                <div id="ytMusicReviewStatus" style="grid-column:1/-1; font-size:12px; color:#94a3b8; padding:4px 0;">Consultando cola…</div>
+                                <div id="ytMusicReviewQueue" class="yt-review-queue"></div>
                             </div>
 
                             <!-- SCRIPTS DE TWITCH -->
@@ -428,7 +491,15 @@
         .tm-red   { background: #f87171; }
         .tm-ghost { background: #6366f1; opacity: .85; font-weight: 500; }
         .tm-spotify { background: #1db954; }   /* verde Spotify */
+        .tm-ytmusic { background: #ef4444; }   /* rojo YouTube Music */
         .tm-twitch  { background: #9146ff; }   /* morado Twitch  */
+        .tm-track-list { display:grid; gap:8px; margin-top:6px; }
+        .tm-track-row { display:grid; grid-template-columns:1fr 1fr 1.15fr auto; gap:6px; align-items:center; }
+        .tm-track-row .modal-input { min-width:0; }
+        .yt-review-queue { grid-column:1/-1; display:grid; gap:8px; max-height:320px; overflow:auto; }
+        .yt-review-card { border:1px solid #334155; border-radius:8px; padding:9px; background:#111827; font-size:12px; }
+        .yt-review-card-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:7px; }
+        .yt-review-card-actions button { padding:5px 8px; }
         .tm-sep {
             grid-column: 1 / -1; margin-top: 12px; font-size: 11px; font-weight: 700;
             color: #64748b; text-transform: uppercase; letter-spacing: .06em;
@@ -436,8 +507,8 @@
     </style>
 
     <script src="/dashboard/js/mirror-client.js?v=20260819-v2"></script>
-    <script src="/dashboard/js/dashboard.js?v=20260725-v8"></script>
-    <script src="/dashboard/js/scripts-ui.js?v=20260819-v4"></script>
+    <script src="/dashboard/js/dashboard.js?v=20260922-v1"></script>
+    <script src="/dashboard/js/scripts-ui.js?v=20260922-v2"></script>
     <script src="/dashboard/js/fleet-lab-controls.js?v=20260819-v2"></script>
     <script src="/dashboard/js/anti-idle.js?v=20260910-v1"></script>
     <script src="/dashboard/js/routines.js?v=20260725-v8"></script>

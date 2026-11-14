@@ -18,6 +18,7 @@ const settings = require('./server/settings');
 const views = require('./server/views');
 const labControl = require('./server/lab_control');
 const antiIdle = require('./server/anti_idle');
+const youtubeMusicGuard = require('./server/youtube_music_guard');
 const router = require('./router');
 const adb = require('./adb');
 const mirror = require('./adb/mirror');
@@ -44,6 +45,7 @@ let win = null;
 let apiToken = '';
 let scheduleInterval = null;
 let antiIdleInterval = null;
+let youtubeMusicGuardInterval = null;
 let pruneInterval = null;
 let monitorInterval = null;
 let accountInventoryInterval = null;
@@ -226,6 +228,11 @@ app.whenReady().then(async () => {
       antiIdle.tick().catch(e => console.error('[anti-idle]', e.message));
     }, 5000);
 
+    // YT Music inactivity guard is independently opt-in and restart-off.
+    youtubeMusicGuardInterval = setInterval(() => {
+      youtubeMusicGuard.tick().catch(e => console.error('[youtube-music-guard]', e.message));
+    }, 5000);
+
     // 4b. Poda de logs antiguos (> 7 días): al arrancar y cada 6 horas, para que
     // la BD no crezca sin límite y cada guardado sea rápido.
     const prune = () => { try { const n = dbServer.pruneLogs(db, 7); if (n) console.log(`[prune] ${n} logs antiguos eliminados`); } catch (e) { console.error('[prune]', e.message); } };
@@ -306,6 +313,7 @@ app.on('window-all-closed', () => {
   safe('intervalos', () => {
     if (scheduleInterval) clearInterval(scheduleInterval);
     if (antiIdleInterval) clearInterval(antiIdleInterval);
+    if (youtubeMusicGuardInterval) clearInterval(youtubeMusicGuardInterval);
     if (pruneInterval) clearInterval(pruneInterval);
     if (monitorInterval) clearInterval(monitorInterval);
     if (accountInventoryInterval) clearInterval(accountInventoryInterval);
@@ -315,6 +323,7 @@ app.on('window-all-closed', () => {
   safe('router', () => router.stop());
   safe('http', () => { if (httpServer) httpServer.close(); });
   safe('anti-idle', () => antiIdle.shutdown());
+  safe('youtube-music-guard', () => youtubeMusicGuard.shutdown());
   safe('account-inventory', () => accountInventory.shutdown());
   safe('db', () => { if (database) database.close(); });
 
