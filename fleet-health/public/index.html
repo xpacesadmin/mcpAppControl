@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>XSAlpha · Fleet Health</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<aside>
+  <div class="brand"><span class="brand-icon">XS</span><strong>XSAlpha<small>FLEET OPERATIONS</small></strong></div>
+  <div class="nav-title">WORKSPACE</div>
+  <nav role="tablist" aria-label="Fleet Health sections" aria-orientation="vertical">
+    <button class="nav active" id="tab-overview" data-tab="overview" role="tab" aria-controls="panel-overview" aria-selected="true">◉ &nbsp; Overview</button>
+    <button class="nav" id="tab-servers" data-tab="servers" role="tab" aria-controls="panel-servers" aria-selected="false">▣ &nbsp; Servers</button>
+    <button class="nav" id="tab-activity" data-tab="activity" role="tab" aria-controls="panel-activity" aria-selected="false">▤ &nbsp; Activity & requests</button>
+  </nav>
+  <div class="side-bottom"><span class="dot healthy"></span> Local control plane<p>Kill switch unchanged<br>Pandora owns automations</p></div>
+</aside>
+<main>
+  <header><div><div class="eyebrow">OPERATIONS / HEALTH</div><h1 id="page-title">Your fleet, at a glance.</h1><p id="subtitle">40 commissioned devices · 2 server boxes</p></div><div class="toolbar"><span id="live" class="pill">Connecting</span><button id="scan-all">↻ Sync all</button><button class="primary" id="deep-all">Verify proxy paths</button></div></header>
+  <section id="panel-overview" role="tabpanel" aria-labelledby="tab-overview">
+    <div class="coverage"><strong>Pandora owns fleet automations.</strong> Fleet Health uses direct ADB for health and owner-triggered maintenance only. No XSAlpha Agent or legacy MCP commands.<p><button id="auto-health">Automatic health: off</button> <span id="auto-health-status"></span></p></div>
+    <div id="summary" class="summary"></div>
+    <div class="section-title"><h2>Server boxes</h2><div class="legend"><span><i class="dot healthy"></i> Healthy</span><span><i class="dot warning"></i> Attention</span><span><i class="dot critical"></i> Critical</span><span><i class="dot unknown"></i> Unverified</span></div></div>
+    <div id="box-shortcuts" class="box-shortcuts"></div>
+    <div class="coverage"><strong>Evidence, not assumptions.</strong> Green reflects recent operational checks. Google sync is not proof of every app login; Play Store evidence only covers updates offered to that device/account. Proxy success does not certify DNS/WAN isolation. Pandora heartbeat is not connected.<p id="route-baselines"></p></div>
+  </section>
+  <section id="panel-servers" role="tabpanel" aria-labelledby="tab-servers" hidden>
+    <div class="section-title"><h2>Servers & fleets</h2><p class="muted">Select a fleet to inspect or maintain it. Alarm reasons appear below each IP.</p></div>
+    <div class="boxes"><div id="box60"></div><div id="box61"></div></div>
+    <div id="details" class="device-details" hidden></div>
+  </section>
+  <section id="panel-activity" role="tabpanel" aria-labelledby="tab-activity" hidden>
+    <div class="section-title"><h2>Activity & repair requests</h2><label>Show <select id="job-filter"><option value="all">All activity</option><option value="actions">Maintenance & AI requests</option><option value="health">Health scans</option></select></label></div>
+    <p id="activity-timezone" class="muted"></p><div id="jobs"></div>
+  </section>
+</main>
+<div id="toast" role="status"></div>
+<dialog id="confirm"><h2 id="confirm-title"></h2><p id="confirm-text"></p><div class="dialog-actions"><button id="confirm-no">Cancel</button><button class="primary" id="confirm-yes">Confirm</button></div></dialog>
+<script src="/ui-model.js"></script><script src="/app.js"></script>
+</body></html>

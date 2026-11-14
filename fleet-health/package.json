@@ -1,0 +1,6 @@
+{
+  "name": "xsalpha-fleet-health", "version": "0.1.0", "private": true,
+  "description": "Local-only fleet health and supervised repair console",
+  "scripts": { "start": "node server.js", "test": "node --test test/*.test.js" },
+  "engines": { "node": ">=22" }
+}
