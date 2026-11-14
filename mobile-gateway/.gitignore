@@ -1,0 +1,9 @@
+data/
+certs/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.pem
+*.key
+.env
+

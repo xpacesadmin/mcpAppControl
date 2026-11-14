@@ -1,0 +1,454 @@
+openapi: 3.1.0
+info:
+  title: XSAlpha Mobile Fleet Console API
+  version: 1.0.0-canary
+  description: >-
+    Purpose-built mobile authorization boundary. It is not a generic reverse proxy.
+    Production access is HTTPS/WSS over an owner-approved Tailscale or WireGuard path.
+servers:
+  - url: https://{approvedVpnHost}:{port}
+    variables:
+      approvedVpnHost:
+        default: gateway.example.ts.net
+      port:
+        default: "8743"
+security:
+  - MobileSession: []
+paths:
+  /mobile/v1/pair/complete:
+    post:
+      security: []
+      summary: Complete a single-use pairing and register Keystore public keys
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PairComplete' }
+      responses:
+        "201":
+          description: Paired device and first short-lived session
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PairResponse' }
+        "401": { $ref: '#/components/responses/Error' }
+        "429": { $ref: '#/components/responses/Error' }
+  /mobile/v1/session/refresh:
+    post:
+      security: []
+      summary: Rotate refresh and access material using a signed request
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        "200":
+          description: Rotated session material
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResponse' }
+        "401": { $ref: '#/components/responses/Error' }
+  /mobile/v1/session/logout:
+    post:
+      summary: Revoke the current session
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+      responses:
+        "200": { $ref: '#/components/responses/Success' }
+        "401": { $ref: '#/components/responses/Error' }
+  /mobile/v1/session/step-up/challenge:
+    post:
+      summary: Issue a short-lived action/target-bound step-up challenge
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StepUpScope' }
+      responses:
+        "201":
+          description: Challenge
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StepUpChallengeResponse' }
+        "403": { $ref: '#/components/responses/Error' }
+  /mobile/v1/session/step-up/complete:
+    post:
+      summary: Verify the user-authenticated Keystore signature and issue a one-use token
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StepUpComplete' }
+      responses:
+        "200":
+          description: One-use step-up token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StepUpTokenResponse' }
+        "401": { $ref: '#/components/responses/Error' }
+  /mobile/v1/me:
+    get:
+      summary: Current mobile identity, role, and server-authoritative capabilities
+      parameters: &signedGet
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+      responses:
+        "200":
+          description: Identity
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MeResponse' }
+        "401": { $ref: '#/components/responses/Error' }
+  /mobile/v1/fleet/summary:
+    get:
+      summary: Sanitized fleet and task totals plus halt state
+      parameters: *signedGet
+      responses:
+        "200": { $ref: '#/components/responses/ReadEnvelope' }
+        "401": { $ref: '#/components/responses/Error' }
+  /mobile/v1/devices:
+    get:
+      summary: Paginated named devices with route/account/health summaries
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        "200": { $ref: '#/components/responses/ReadEnvelope' }
+  /mobile/v1/devices/{deviceId}:
+    get:
+      summary: One named device; never accepts or returns an ADB serial
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/DeviceId'
+      responses:
+        "200": { $ref: '#/components/responses/ReadEnvelope' }
+        "404": { $ref: '#/components/responses/Error' }
+  /mobile/v1/devices/{deviceId}/account-health:
+    get:
+      summary: Aggregated account-presence state without account identifiers
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/DeviceId'
+      responses:
+        "200": { $ref: '#/components/responses/ReadEnvelope' }
+  /mobile/v1/routes:
+    get:
+      summary: Route IDs and verification state without provider/internal endpoints
+      parameters: *signedGet
+      responses:
+        "200": { $ref: '#/components/responses/ReadEnvelope' }
+  /mobile/v1/automations:
+    get:
+      summary: Sanitized status of already-defined guards
+      parameters: *signedGet
+      responses:
+        "200": { $ref: '#/components/responses/ReadEnvelope' }
+  /mobile/v1/activity:
+    get:
+      summary: Recent sanitized task outcomes
+      parameters: *signedGet
+      responses:
+        "200": { $ref: '#/components/responses/ReadEnvelope' }
+  /mobile/v1/alerts:
+    get:
+      summary: Sanitized alerts
+      parameters: *signedGet
+      responses:
+        "200": { $ref: '#/components/responses/ReadEnvelope' }
+  /mobile/v1/audit:
+    get:
+      summary: Merged sanitized desktop and mobile audit timeline
+      parameters: *signedGet
+      responses:
+        "200": { $ref: '#/components/responses/ReadEnvelope' }
+  /mobile/v1/devices/{deviceId}/stream-ticket:
+    post:
+      summary: Reserved one-device live-view ticket endpoint
+      description: Returns phase_not_enabled in the read-only canary. It never returns a desktop mirror URL/token.
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/DeviceId'
+      responses:
+        "423": { $ref: '#/components/responses/Error' }
+  /mobile/v1/commands:
+    post:
+      summary: Submit one fixed, declarative, idempotent command
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/Confirmation'
+        - $ref: '#/components/parameters/StepUpToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CommandRequest' }
+      responses:
+        "202":
+          description: Accepted operation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationResponse' }
+        "403": { $ref: '#/components/responses/Error' }
+        "409": { $ref: '#/components/responses/Error' }
+        "422": { $ref: '#/components/responses/Error' }
+        "423": { $ref: '#/components/responses/Error' }
+  /mobile/v1/operations/{operationId}:
+    get:
+      summary: Recover status for an operation owned by the current session
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - name: operationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Operation status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationResponse' }
+        "404": { $ref: '#/components/responses/Error' }
+  /mobile/v1/emergency-stop:
+    post:
+      summary: Administrator-only, step-up-protected fleet emergency stop
+      parameters: &signedWrite
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/Confirmation'
+        - $ref: '#/components/parameters/StepUpToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FleetWriteRequest' }
+      responses:
+        "202":
+          description: Accepted operation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationResponse' }
+  /mobile/v1/resume:
+    post:
+      summary: Administrator-only, step-up-protected resume; schedules stay disabled
+      parameters: *signedWrite
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FleetWriteRequest' }
+      responses:
+        "202":
+          description: Accepted operation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationResponse' }
+components:
+  securitySchemes:
+    MobileSession:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-short-lived
+  parameters:
+    Timestamp:
+      name: X-XSAlpha-Timestamp
+      in: header
+      required: true
+      schema: { type: integer, format: int64 }
+    Nonce:
+      name: X-XSAlpha-Nonce
+      in: header
+      required: true
+      schema: { type: string, minLength: 16, maxLength: 128 }
+    Signature:
+      name: X-XSAlpha-Signature
+      in: header
+      required: true
+      schema: { type: string, description: base64url ECDSA P-256 signature }
+    Confirmation:
+      name: X-XSAlpha-Confirmation
+      in: header
+      required: true
+      schema: { type: string, const: "true" }
+    StepUpToken:
+      name: X-XSAlpha-Step-Up-Token
+      in: header
+      required: false
+      schema: { type: string, description: One-use token required for high-impact operations }
+    DeviceId:
+      name: deviceId
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PerPage:
+      name: per_page
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+  responses:
+    Success:
+      description: Success
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+    ReadEnvelope:
+      description: Sanitized data with server timestamp and explicit freshness
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+    Error:
+      description: Bounded error with no secret or upstream implementation detail
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error, server_time]
+            properties:
+              error:
+                type: object
+                required: [code, message]
+                properties:
+                  code: { type: string }
+                  message: { type: string }
+              server_time: { type: string, format: date-time }
+  schemas:
+    Envelope:
+      type: object
+      required: [data, server_time, data_freshness]
+      properties:
+        data: {}
+        server_time: { type: string, format: date-time }
+        data_freshness: { $ref: '#/components/schemas/Freshness' }
+    Freshness:
+      type: object
+      required: [age_seconds, maximum_age_seconds, state]
+      properties:
+        as_of: { type: [string, "null"], format: date-time }
+        age_seconds: { type: [integer, "null"], minimum: 0 }
+        maximum_age_seconds: { type: integer, minimum: 1 }
+        state: { type: string, enum: [fresh, stale, unknown] }
+    PairComplete:
+      type: object
+      additionalProperties: false
+      required: [code, device_name, public_key_pem, step_up_public_key_pem, timestamp, proof_signature]
+      properties:
+        code: { type: string, pattern: '^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$' }
+        device_name: { type: string, minLength: 2, maxLength: 80 }
+        public_key_pem: { type: string, description: ECDSA P-256 SPKI public key }
+        step_up_public_key_pem: { type: string, description: User-authenticated ECDSA P-256 SPKI public key }
+        timestamp: { type: integer, format: int64 }
+        proof_signature: { type: string }
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      required: [device_id, refresh_token]
+      properties:
+        device_id: { type: string, format: uuid }
+        refresh_token: { type: string }
+    Session:
+      type: object
+      required: [id, access_token, access_expires_at, refresh_token, refresh_expires_at]
+      properties:
+        id: { type: string, format: uuid }
+        access_token: { type: string }
+        access_expires_at: { type: string, format: date-time }
+        refresh_token: { type: string }
+        refresh_expires_at: { type: string, format: date-time }
+    PairResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+    SessionResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+    MeResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+    StepUpScope:
+      type: object
+      additionalProperties: false
+      required: [action, target_device_ids]
+      properties:
+        action: { type: string }
+        target_device_ids:
+          type: array
+          uniqueItems: true
+          maxItems: 10
+          items: { type: integer, minimum: 1 }
+    StepUpComplete:
+      allOf:
+        - $ref: '#/components/schemas/StepUpScope'
+        - type: object
+          required: [challenge_id, challenge, step_up_signature]
+          properties:
+            challenge_id: { type: string, format: uuid }
+            challenge: { type: string }
+            step_up_signature: { type: string }
+    StepUpChallengeResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+    StepUpTokenResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+    CommandRequest:
+      type: object
+      additionalProperties: false
+      required: [action, target_device_ids, parameters, reason, confirm, idempotency_key]
+      properties:
+        action:
+          type: string
+          enum: [refresh_status, capture_screenshot, screen_on, screen_off, home, back, open_package, media_play, media_pause, media_next, stop_task, start_anti_idle, stop_anti_idle]
+        target_device_ids:
+          type: array
+          minItems: 1
+          maxItems: 10
+          uniqueItems: true
+          items: { type: integer, minimum: 1 }
+        parameters:
+          type: object
+          description: Only action-specific fields are accepted; never raw command/URL/shell/workflow data.
+        reason: { type: string, minLength: 4, maxLength: 240 }
+        confirm: { type: boolean, const: true }
+        idempotency_key: { type: string, format: uuid }
+    FleetWriteRequest:
+      type: object
+      additionalProperties: false
+      required: [target_device_ids, reason, confirm, idempotency_key]
+      properties:
+        target_device_ids: { type: array, maxItems: 0 }
+        reason: { type: string, minLength: 4, maxLength: 240 }
+        confirm: { type: boolean, const: true }
+        idempotency_key: { type: string, format: uuid }
+    OperationResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'

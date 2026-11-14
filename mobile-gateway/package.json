@@ -1,0 +1,17 @@
+{
+  "name": "@xsalpha/mobile-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VPN-only authorization gateway for XSAlpha Fleet Console",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "pair:create": "node src/pairing-cli.js create",
+    "session:revoke-all": "node src/pairing-cli.js revoke-all",
+    "test": "node --test"
+  }
+}
+
