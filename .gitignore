@@ -77,3 +77,8 @@ docs/proxy-routes/
 scripts/fleet/xpace-canary-*.ps1
 scripts/proxy-orch/install-fleet*.sh
 scripts/proxy-orch/rollback-fleet*.sh
+
+# Python runtime output, not route-management source.
+__pycache__/
+*.py[cod]
+.pytest_cache/
